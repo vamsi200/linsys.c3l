@@ -1,8 +1,8 @@
 module c3sys;
 import std::io;
+import proc;
 
 fn int main(String[] args)
 {
-	io::printn("Hello, World!");
 	return 0;
 }
