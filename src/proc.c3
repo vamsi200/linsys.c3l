@@ -107,7 +107,7 @@ String path = string::tformat("/proc/%d/status", pid);
     defer (void)file.close();
 
     char[4096] buf;
-    usz n = file.read(&buf)!!;
+    sz n = file.read(&buf)!!;
     String content = (String)buf[0:n];
     String[] lines = content.split(mem, "\n");
 
@@ -164,7 +164,7 @@ fn Process? proc_get(Allocator mem, int pid) {
     defer (void)file.close();
 
     char[4096] buf;
-    usz n = file.read(&buf)!!;
+    sz n = file.read(&buf)!!;
     String content = (String)buf[0:n];
     String[] lines = content.split(mem, "\n");
 
@@ -202,10 +202,10 @@ fn int[]? proc_list_pids(Allocator mem) {
     Path p = io::path::new(mem, "/proc")!;
     String s = "";
     PathList list = io::path::ls(mem, p)!;
-    usz count = 0;
+    sz count = 0;
 
     foreach (l: list) {
-        if (try l.path_string.to_int()) {
+        if (try l.file_basename(mem).to_int()) {
           count++;
       }
     }
@@ -214,7 +214,7 @@ fn int[]? proc_list_pids(Allocator mem) {
     int i = 0;
 
     foreach (l: list) {
-      if (try int pid = l.path_string.to_int()) {
+      if (try int pid = l.file_basename(mem).to_int()) {
         proc_list[i++] = pid;
     }
   }
@@ -237,7 +237,7 @@ fn String proc_cwd(int pid) {
     char[4096] buf;
     String path = string::tformat("/proc/%d/cwd", pid);
 
-    isz len = libc::readlink(
+    sz len = libc::readlink(
         (ZString)path,
         &buf,
         buf.len - 1
@@ -257,7 +257,7 @@ fn EnvVar[]? proc_environ(Allocator mem, int pid) {
     String path = string::tformat("/proc/%d/environ", pid);
     File f = file::open(path, "r")!;
     defer (void)f.close();
-    usz size = f.read(&buf)!!;
+    sz size = f.read(&buf)!!;
 
     String[] s = ((String)buf[0:size]).split(mem, "\0");
     EnvVar[] ev = mem::alloc::alloc_array(mem, EnvVar, s.len);
@@ -282,13 +282,13 @@ fn String? proc_read_cmdline(int pid) {
     defer (void)f.close();
     char[4096] buf;
     String cmdline;
-    usz len = f.read(&buf)!!;
+    sz len = f.read(&buf)!!;
 
     if (len == 0) {
         cmdline = "";
     } else {
 
-        for (usz i = 0; i < len; i++) {
+        for (sz i = 0; i < len; i++) {
             if (buf[i] == '\0') {
                 buf[i] = ' ';
             }
@@ -305,7 +305,7 @@ fn String? proc_read_exe(int pid) {
     String path = string::tformat("/proc/%d/exe", pid);
     char[4096] buf;
 
-    isz len = libc::readlink((ZString)path, &buf, buf.len - 1);
+    sz len = libc::readlink((ZString)path, &buf, buf.len - 1);
     String exe_path;
 
     if (len > 0){
@@ -327,9 +327,9 @@ fn String[]? proc_fds(Allocator mem, int pid) {
     int i = 0;
 
     foreach (l: list) {
-        String full = string::tformat("%s/%s", p, l.path_string);
+        String full = string::tformat("%s/%s", p, l.file_basename(mem)!);
         ZString zpath = full.zstr_tcopy();
-        isz n = libc::readlink(zpath, &buf, buf.len - 1);
+        sz n = libc::readlink(zpath, &buf, buf.len - 1);
         if (n < 0) continue;
         fds[i++] = ((String)buf[0:n]).copy(mem);
     }
@@ -342,15 +342,15 @@ fn ProcStat? proc_read_stat(Allocator mem, int pid) {
     File f = file::open(path, "r")!;
     defer (void)f.close();
     char[256] buf;
-    usz n = f.read(&buf)!;
+    sz n = f.read(&buf)!;
     String s = ((String)buf[0:n]).copy(mem);
 
-    usz close = s.rindex_of_char(')')!;
-    usz open = s.index_of_char('(')!;
+    sz close = s.rindex_of_char(')')!;
+    sz open = s.index_of_char('(')!;
 
     ProcStat ps;
     ps.pid = pid;
-    ps.comm = s[open+1..close].strip_end(")").copy(mem);
+    ps.comm = s[open+1..close].strip_suffix(")").copy(mem);
 
     String rest = s[close+2..];
     String[] fields = rest.split(mem, " ");
@@ -370,7 +370,7 @@ fn MemoryMap[]? proc_maps(Allocator mem, int pid) {
     defer (void)f.close();
 
     char[4096] buf; // think about this
-    usz n = f.read(&buf)!!;
+    sz n = f.read(&buf)!!;
     String[] lines = ((String)buf[0:n]).copy(mem).split(mem, "\n");
     MemoryMap[] mm = mem::alloc::alloc_array(mem, MemoryMap, lines.len);
     int i = 0;
