@@ -21,10 +21,9 @@ fn int main(String[] args)
 
   // ProcStat p = proc::proc_read_stat(tmem, 1)!!;
   // io::printn(p);
-
-  MemoryMap[] mm = proc::proc_maps(tmem, 167192)!!;
-  foreach (l: mm){
-      io::printn(l);
-  }
+	Connection[] connections = proc::proc_connections(tmem, 2723)!!;
+	foreach(conn: connections) {
+		io::printn(conn);
+	}
 	return 0;
 }
