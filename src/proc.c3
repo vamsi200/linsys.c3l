@@ -64,10 +64,10 @@ struct CpuTimes {
 }
 
 struct IoCounters {
-    long read_count;
-    long write_count;
-    long read_bytes;
-    long write_bytes;
+    ulong read_count;
+    ulong write_count;
+    ulong read_bytes;
+    ulong write_bytes;
 }
 
 struct OpenFile {
@@ -753,14 +753,107 @@ fn double? proc_cpu_percent(int pid, double interval) {
 	return (proc_delta / total_delta) * cpu_count * 100.0;
 }
 
-fn double? proc_memory_percent(int pid) { abort("Not Yet Implemented!"); }
-fn IoCounters? proc_io_counters(int pid) { abort("Not Yet Implemented!"); }
+fn double? proc_memory_percent(int pid) { 
+	String p = string::tformat("/proc/%d/status", pid);
+	File file = file::open(p, "r")!!;
+	char[4096] buf;
+	sz n = file.read(&buf)!!;
+	String[] lines = ((String)buf[:n]).split(tmem, "\n");
+	ulong vmrs = 0;
+	foreach (line: lines) {
+		if (line.starts_with("VmRSS")) {
+			String[] s = line.trim().split(tmem, ":");
+			if (s.len < 2) continue;
+			
+			if (try ulong v = s[1].strip_suffix(" kB").to_ulong()) vmrs = v;
+		}		
+	}
 
-fn void proc_send_signal(int pid, int signal) { abort("Not Yet Implemented!"); }
-fn void proc_suspend(int pid) { abort("Not Yet Implemented!"); }
-fn void proc_resume(int pid) { abort("Not Yet Implemented!"); }
-fn void proc_kill(int pid) { abort("Not Yet Implemented!"); }
-fn void proc_terminate(int pid) { abort("Not Yet Implemented!"); }
+	File file1 = file::open("/proc/meminfo", "r")!!;
+	char[4096] buf1;
+	sz n1 = file1.read(&buf1)!!;
+	String[] lines1 = ((String)buf1[:n1]).split(tmem, "\n");
+	ulong total_mem = 0;
+
+	foreach (line: lines1) {
+		if (line.starts_with("MemTotal")) {
+			String[] s1 = line.trim().split(tmem, ":");
+			if (s1.len < 2) continue;
+			if (try ulong tv = s1[1].strip_suffix(" kB").to_ulong()) total_mem = tv;
+		} 
+	}
+
+
+	if (total_mem == 0) return 0.0;
+	return ((double)vmrs / (double)total_mem) * 100.0;
+}
+
+fn IoCounters? proc_io_counters(int pid) { 
+	IoCounters ioc = {};
+	String p = string::tformat("/proc/%d/io", pid);
+	File file = file::open(p, "r")!!;
+	char[4096] buf;
+	sz n = file.read(&buf)!!;
+	String[] lines = ((String)buf[:n]).split(tmem, "\n");
+	
+	foreach (line : lines) {
+		String[] split = line.split(tmem, ":");
+		if (split.len < 2) continue;
+		String key = split[0].trim();
+		String value = split[1].trim();
+
+		switch (key) {
+			case "rchar":
+				if (try ulong v = value.to_ulong()) ioc.read_bytes = v;
+			case "wchar":
+				if (try ulong v = value.to_ulong()) ioc.write_bytes = v;
+			case "read_bytes":
+				if (try ulong v = value.to_ulong()) ioc.read_count = v;
+			case "write_bytes":
+				if (try ulong v = value.to_ulong()) ioc.write_count = v;
+			default:
+				continue;
+		}
+	}
+
+	return ioc;
+}
+
+constdef Signal : int {
+    TERM = 15,
+    KILL = 9,
+    STOP = 19,
+    CONT = 18,
+    INT = 2,
+}
+
+fn bool proc_send_signal(int pid, Signal signal) {
+    if (pid <= 0) {
+        return false;
+    }
+    return posix::kill(pid, (CInt)signal) == 0;
+}
+
+fn bool proc_suspend(int pid) {
+    return proc_send_signal(pid, Signal.STOP);
+}
+
+fn bool proc_resume(int pid) {
+    return proc_send_signal(pid, Signal.CONT);
+}
+
+fn bool proc_kill(int pid) {
+    return proc_send_signal(pid, Signal.KILL);
+}
+
+fn bool proc_terminate(int pid) {
+    return proc_send_signal(pid, Signal.TERM);
+}
+
+fn bool proc_interrupt(int pid) {
+    return proc_send_signal(pid, Signal.INT);
+}
+
 fn int[]? proc_children(int pid, bool recursive) { abort("Not Yet Implemented!"); }
 fn int? proc_parent(int pid) { abort("Not Yet Implemented!"); }
 fn int? proc_nice_get(int pid) { abort("Not Yet Implemented!"); }

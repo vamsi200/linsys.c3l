@@ -21,7 +21,10 @@ fn int main(String[] args)
 
   // ProcStat p = proc::proc_read_stat(tmem, 1)!!;
   // io::printn(p);
-	double c = proc::proc_cpu_percent(1, 10.0)!!;
-	io::printn(c);
+
+	// double mem_p = proc::proc_memory_percent(81291)!!;
+	// IoCounters ioc = proc::proc_io_counters(81291)!!;
+	bool val = proc::proc_kill(216645);
+	if (val) io::printf("target eliminated boss\n");
 	return 0;
 }
