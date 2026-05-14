@@ -4,6 +4,8 @@ import libc;
 import std::core::string;
 import  std::collections::list;
 import std::net;
+import std::os::posix;
+import std::thread;
 
 struct Process {
     int pid;
@@ -551,6 +553,7 @@ fn TcpState tcp_state(String hex){
     }
 }
 
+// TODO: add v6
 fn void read_connections(Allocator allocator, int pid, Protocol proto, List {Connection}* out){
 	String filename;
 	switch (proto) {
@@ -593,20 +596,163 @@ fn void read_connections(Allocator allocator, int pid, Protocol proto, List {Con
 }
 
 fn Connection[]? proc_connections(Allocator allocator, int pid) {
-    List{Connection} list;
-    list.init(allocator);
+	List{Connection} list;
+	list.init(allocator);
 
-    read_connections(allocator, pid, Protocol.TCP,  &list);
-    read_connections(allocator, pid, Protocol.UDP,  &list);
+	read_connections(allocator, pid, Protocol.TCP,  &list);
+	read_connections(allocator, pid, Protocol.UDP,  &list);
 
-    return list.array_view();
+	return list.array_view();
 }
 
-
 fn ProcStatus? proc_read_status(int pid) { abort("Not Yet Implemented!"); }
-fn long? proc_create_time(int pid) { abort("Not Yet Implemented!"); }
-fn CpuTimes? proc_cpu_times(int pid) { abort("Not Yet Implemented!"); }
-fn double? proc_cpu_percent(int pid, double interval) { abort("Not Yet Implemented!"); }
+
+fn ulong proc_read_boot_time() {
+	File file = file::open("/proc/stat", "r")!!;
+	ulong btime;
+	char[8096] buf;
+	sz n = file.read(&buf)!!;
+	String[] lines = ((String)buf[:n]).split(tmem, "\n");
+	foreach (line: lines) {
+		if (line.contains("btime")) {
+			String s = line.strip_suffix("btime ");
+			if (try ulong bt = s.to_ulong()) btime = bt;
+		}
+	}
+	
+	return btime;
+}
+
+// getconf CLK_TCK
+fn ulong read_clktck() {
+	File file = file::open("/proc/self/auxv", "rb")!!;
+	char[4096] buf;
+	sz n = file.read(&buf)!!;
+
+	sz i = 0;
+	while (i + 16 <= n) {
+	ulong type, val;
+	mem::copy(&type, &buf[i], 8);
+	mem::copy(&val,  &buf[i + 8], 8);
+
+	if (type == 17) return val; // AT_CLKTCK
+	if (type == 0)  break;      // AT_NULL
+	i += 16;
+	}
+	return 100;
+}
+
+fn double? proc_create_time(int pid) {
+	String p = string::tformat("/proc/%d/stat", pid);
+	File file = file::open(p, "r")!!;
+	char[4096] buf;
+	sz n = file.read(&buf)!!;
+	double start_time;
+	String raw = (String)buf[:n];
+	sz rp = raw.rindex_of(")")!!;
+	String after = raw[(rp + 2)..];
+
+	String[] fields = after.split(tmem, " ");
+	if (fields.len < 20) return 0;
+
+	if (try ulong val = fields[19].to_ulong()) {
+	ulong btime = proc_read_boot_time();
+	ulong clktck = read_clktck();
+	start_time = (double)btime + ((double)val / (double)clktck);
+	}
+	return start_time;
+
+}
+
+fn CpuTimes? proc_cpu_times(int pid) {  
+	CpuTimes cpu  = {};
+	String p = string::tformat("/proc/%d/stat", pid);
+	File file = file::open(p, "r")!!;
+	char[4096] buf;
+	sz n = file.read(&buf)!!;
+	String raw = (String)buf[:n];
+	sz rp = raw.rindex_of(")")!!;
+	String after = raw[(rp + 2)..];
+
+	String[] fields = after.split(tmem, " ");
+	if (fields.len <= 14) return cpu;
+	double clktck = (double)read_clktck();
+	if (try double utime = fields[11].to_double() &&
+		try double stime = fields[12].to_double() &&
+		try double cutime = fields[13].to_double() &&
+		try double cstime = fields[14].to_double())
+	{
+		cpu.user = utime / clktck;
+		cpu.system = stime / clktck ;
+		cpu.children_user = cutime / clktck;
+		cpu.children_system = cstime / clktck;
+	}
+
+	return cpu;   		
+}
+
+fn double? proc_cpu_percent(int pid, double interval) {
+	CpuTimes first = proc_cpu_times(pid)!!;
+
+	double proc1 = first.user + first.system;
+
+	File file1 = file::open("/proc/stat", "r")!!;
+	char[4096] buf1;
+	sz n1 = file1.read(&buf1)!!;
+	String[] lines1 = ((String)buf1[:n1]).split(tmem, "\n");
+	ulong total1 = 0;
+	int cpu_count = 0;
+
+	foreach (i, line : lines1) {
+		if (i == 0) {
+			String[] split = line.strip_prefix("cpu ").trim().split(tmem, " ");
+			if (split.len < 8) return 0.0;
+			total1 =
+				split[0].to_ulong()! +
+				split[1].to_ulong()! +
+				split[2].to_ulong()! +
+				split[3].to_ulong()! +
+				split[4].to_ulong()! +
+				split[5].to_ulong()! +
+				split[6].to_ulong()! +
+				split[7].to_ulong()!;
+		}
+		else if (line.starts_with("cpu")) {
+			cpu_count += 1;
+		}
+	}
+
+	thread::sleep_ms((long)(interval * 1000));
+	CpuTimes second = proc_cpu_times(pid)!!;
+	double proc2 = second.user + second.system;
+	File file2 = file::open("/proc/stat", "r")!!;
+	char[4096] buf2;
+	sz n2 = file2.read(&buf2)!!;
+	String[] lines2 = ((String)buf2[:n2]).split(tmem, "\n");
+	ulong total2 = 0;
+
+	foreach (i, line : lines2) {
+		if (i != 0) continue;
+		String[] split = line.strip_prefix("cpu ").trim().split(tmem, " ");
+		if (split.len < 8) return 0.0;
+		total2 =
+			split[0].to_ulong()! +
+			split[1].to_ulong()! +
+			split[2].to_ulong()! +
+			split[3].to_ulong()! +
+			split[4].to_ulong()! +
+			split[5].to_ulong()! +
+			split[6].to_ulong()! +
+			split[7].to_ulong()!;
+		break;
+	}
+
+	double proc_delta = proc2 - proc1;
+	double total_delta = (double)(total2 - total1);
+	if (total_delta <= 0) return 0.0;
+	return (proc_delta / total_delta) * cpu_count * 100.0;
+}
+
 fn double? proc_memory_percent(int pid) { abort("Not Yet Implemented!"); }
 fn IoCounters? proc_io_counters(int pid) { abort("Not Yet Implemented!"); }
 

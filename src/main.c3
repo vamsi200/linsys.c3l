@@ -21,9 +21,7 @@ fn int main(String[] args)
 
   // ProcStat p = proc::proc_read_stat(tmem, 1)!!;
   // io::printn(p);
-	Connection[] connections = proc::proc_connections(tmem, 2723)!!;
-	foreach(conn: connections) {
-		io::printn(conn);
-	}
+	double c = proc::proc_cpu_percent(1, 10.0)!!;
+	io::printn(c);
 	return 0;
 }
