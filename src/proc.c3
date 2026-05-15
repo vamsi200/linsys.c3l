@@ -2,7 +2,7 @@ import std::io;
 import std::io::file;
 import libc;
 import std::core::string;
-import  std::collections::list;
+import std::collections::list;
 import std::net;
 import std::os::posix;
 import std::thread;
@@ -42,18 +42,6 @@ struct ProcStat {
     int pgrp;
     int session;
     int tty_nr;
-}
-
-struct ProcStatus {
-    int pid;
-    String name;
-    char state;
-    int ppid;
-    int uid;
-    int gid;
-    int threads;
-    long vm_size;
-    long vm_rss;
 }
 
 struct CpuTimes {
@@ -125,50 +113,67 @@ struct RLimitEntry {
     RLimit limit;
 }
 
+fn String read_file(Allocator allocator, File file){
+    char[4096] temp;
+    DString builder;
+    builder.init(allocator);
+
+    while (true) {
+	sz n = file.read(&temp)!!;
+	if (n==0) break;
+	builder.append(temp[:n]);
+	
+    }
+	
+   return builder.str_view();
+}
+
 fn ProcessInfo? proc_get_info(Allocator allocator, int pid){
-String path = string::tformat("/proc/%d/status", pid);
+    String path = string::tformat("/proc/%d/status", pid);
     File file = file::open(path, "r")!;
     defer (void)file.close();
 
-    char[4096] buf;
-    sz n = file.read(&buf)!!;
-    String content = (String)buf[0:n];
-    String[] lines = content.split(allocator, "\n");
+    String content = read_file(allocator, file);
+    defer catch alloc::free(allocator, content);
 
-    ProcessInfo proc;
+    String[] lines = content.split(allocator, "\n");
+    defer catch alloc::free(allocator, lines);
+
+    ProcessInfo proc = {};
     Process p = proc_get(allocator, pid)!;
 
     foreach (line : lines) {
-        String[] split = line.split(allocator, ":");
+	long? idx = line.index_of_char(':');
+	if (catch err = idx) continue; 
+	if (idx == -1) continue;
 
-        if (split.len != 2) continue;
-
-        String key = split[0].trim();
-        String data = split[1].trim();
+        String key = line[:idx].trim();
+        String data = line[idx+1..].trim();
+	String first = data.trim();
 
         switch (key) {
         case "Threads":
             proc.threads = data.to_int()!;
 
         case "Uid":
-            String[] d = data.split(allocator, "\t");
-
-            if (try int uid = d[0].to_int()) proc.uid = uid;
+	    long uid_idx = first.index_of_char('\t')!;
+	    first = uid_idx == -1 ? first : first[:uid_idx];
+            if (try int uid = first.to_int()) proc.uid = uid;
 
         case "Gid":
-            String[] d = data.split(allocator, "\t");
-
-            if (try int gid = d[0].to_int()) proc.gid = gid;
+            long gid_idx = first.index_of_char('\t')!;
+	    first = gid_idx == -1 ? first : first[:gid_idx];
+            if (try int gid = first.to_int()) proc.gid = gid;
 
         case "VmSize":
-            String[] d = data.split(allocator, " ");
-
-            if (try long vms = d[0].to_long()) proc.vm_size = vms;
+	    long vms_idx = first.index_of_char(' ')!;
+	    first = vms_idx == -1 ? first : first[:vms_idx];
+            if (try long vms = first.to_long()) proc.vm_size = vms;
 
         case "VmRSS":
-            String[] d = data.split(allocator, " ");
-
-            if (try long vmrss = d[0].to_long()) proc.vm_rss = vmrss;
+	    long vmrss_idx = first.index_of_char(' ')!;
+	    first = vmrss_idx == -1 ? first : first[:vmrss_idx];
+            if (try long vmrss = first.to_long()) proc.vm_rss = vmrss;
 
         default:
             continue;
@@ -187,18 +192,21 @@ fn Process? proc_get(Allocator allocator, int pid) {
     File file = file::open(path, "r")!;
     defer (void)file.close();
 
-    char[4096] buf;
-    sz n = file.read(&buf)!!;
-    String content = (String)buf[0:n];
+    String content = read_file(allocator, file);
+    defer alloc::free(allocator, content);
+
     String[] lines = content.split(allocator, "\n");
+    defer alloc::free(allocator, lines);
 
     Process p;
 
     foreach (line: lines) {
-        String[] split = line.split(allocator, ":");
-        if (split.len != 2) continue;
-        String key = split[0].trim();
-        String data = split[1].trim();
+	long? idx = line.index_of_char(':');
+	if (catch err = idx) continue;
+	if (idx == -1) continue;
+
+        String key = line[:idx].trim();
+        String data = line[idx+1..].trim();
 
       switch (key) {
         case "Pid":
@@ -224,39 +232,40 @@ fn Process? proc_get(Allocator allocator, int pid) {
 // NOTE: is this the correct way?
 fn int[]? proc_list_pids(Allocator allocator) {
     Path p = io::path::new(allocator, "/proc")!;
-    String s = "";
+    defer alloc::free(allocator, p);
+
     PathList list = io::path::ls(allocator, p)!;
+    defer list.free();
     sz count = 0;
 
     foreach (l: list) {
-        if (try l.file_basename(allocator).to_int()) {
+        if (try l.file_tbasename().to_int()) {
           count++;
-      }
+        }
     }
   
     int[] proc_list = mem::alloc::alloc_array(allocator, int, count);
     int i = 0;
 
     foreach (l: list) {
-      if (try int pid = l.file_basename(allocator).to_int()) {
+      if (try int pid = l.file_tbasename().to_int()) {
         proc_list[i++] = pid;
+      }
     }
-  }
 
-  return proc_list;
+    return proc_list;
 }
 
 fn bool proc_exists(int pid) {
-  int[] proc_list = proc_list_pids(tmem)!!;
-  foreach (p: proc_list){
-    if (p == pid) {
-        return true;
+    int[] proc_list = proc_list_pids(tmem)!!;
+    foreach (p: proc_list){
+       if (p == pid) {
+          return true;
+       }
     }
-  }
-  return false;
+    return false;
 }
 
-// NOTE: Should we handle error? throught the library?
 fn String proc_cwd(int pid) {
     char[4096] buf;
     String path = string::tformat("/proc/%d/cwd", pid);
@@ -273,52 +282,53 @@ fn String proc_cwd(int pid) {
 
     buf[len] = 0;
 
-    return (String)buf[0:len];
+    return (String)buf[:len];
 }
 
 fn EnvVar[]? proc_environ(Allocator allocator, int pid) {
-    char[4096] buf;
     String path = string::tformat("/proc/%d/environ", pid);
-    File f = file::open(path, "r")!;
-    defer (void)f.close();
-    sz size = f.read(&buf)!!;
+    File file = file::open(path, "r")!;
+    defer (void)file.close();
 
-    String[] s = ((String)buf[0:size]).split(allocator, "\0");
+    String[] s = read_file(allocator, file).split(allocator, "\0");
+    defer alloc::free(allocator, s);
+
     EnvVar[] ev = mem::alloc::alloc_array(allocator, EnvVar, s.len);
+
     int i = 0;
-    EnvVar entry;
+    EnvVar entry = {};
+
     foreach (line: s) {
-        String[] split = line.split(allocator, "=");
-        if (split.len < 2) {
-            continue;
-        }
-        entry.key = split[0].trim().copy(allocator);
-        entry.value = split[1].trim().copy(allocator);
+	long? idx = line.index_of_char('=');
+	if (catch err = idx) continue;
+	if (idx == -1) continue;
+
+        entry.key = line[:idx].trim().copy(allocator);
+        entry.value = line[idx+1..].trim().copy(allocator);
         ev[i++] = entry;
     }
 
-    return ev[0:i];
+    return ev[:i];
 }
 
 fn String? proc_read_cmdline(int pid) {
     String path = string::tformat("/proc/%d/cmdline", pid);
-    File f = file::open(path, "r")!!;
-    defer (void)f.close();
-    char[4096] buf;
+    File file = file::open(path, "r")!;
+    defer (void)file.close();
     String cmdline;
-    sz len = f.read(&buf)!!;
+    String content = read_file(tmem, file);
+    sz len = content.len;
 
     if (len == 0) {
         cmdline = "";
     } else {
-
         for (sz i = 0; i < len; i++) {
-            if (buf[i] == '\0') {
-                buf[i] = ' ';
+            if (content[i] == '\0') {
+                content[i] = ' ';
             }
         }
 
-        cmdline = ((String)buf[0:len]).copy(mem);
+        cmdline = ((String)content[:len]).copy(tmem);
     }
 
     return cmdline.trim_right();
@@ -333,7 +343,7 @@ fn String? proc_read_exe(int pid) {
     String exe_path;
 
     if (len > 0){
-        exe_path = ((String)buf[0:len]).copy(mem);
+        exe_path = ((String)buf[:len]).copy(tmem);
     }
     else{
         exe_path = "";
@@ -345,49 +355,51 @@ fn String? proc_read_exe(int pid) {
 fn String[]? proc_fds_path(Allocator allocator, int pid) {
     String p = string::tformat("/proc/%d/fd", pid);
     Path path = path::new(allocator, p)!;
+    defer alloc::free(allocator, path);
     PathList list = io::path::ls(allocator, path)!;
+    defer list.free();
     String[] fds = mem::alloc::alloc_array(allocator, String, list.len());
     char[4096] buf;
     int i = 0;
 
     foreach (l: list) {
-        String full = string::tformat("%s/%s", p, l.file_basename(allocator)!);
+        String full = string::tformat("%s/%s", p, l.file_tbasename()!);
         ZString zpath = full.zstr_tcopy();
         sz n = libc::readlink(zpath, &buf, buf.len - 1);
         if (n < 0) continue;
-        fds[i++] = ((String)buf[0:n]).copy(allocator);
+        fds[i++] = ((String)buf[:n]).copy(allocator);
     }
-    return fds[0:i];
+    return fds[:i];
 }
 
 fn int[]? proc_fds(Allocator allocator, int pid) {
-	String p = string::tformat("/proc/%d/fd", pid);
-	Path path = path::new(allocator, p)!;
-	PathList list = io::path::ls(allocator, path)!;
-	int[] fds = mem::alloc::alloc_array(allocator, int, list.len());
-	int i = 0;
+    String p = string::tformat("/proc/%d/fd", pid);
+    Path path = path::new(allocator, p)!;
+    defer alloc::free(allocator, path);
 
-	foreach (fd: list) {
-		if (try int ifd = fd.trim().to_int()) fds[i++] = ifd;
-	}
+    PathList list = io::path::ls(allocator, path)!;
+    defer list.free();
 
-	return fds[0:i];
+    int[] fds = mem::alloc::alloc_array(allocator, int, list.len());
+    int i = 0;
 
+    foreach (fd: list) {
+	if (try int ifd = fd.trim().to_int()) fds[i++] = ifd;
+    }
+
+   return fds[:i];
 }
 
 // Should I even keep this function and the struct???
 fn ProcStat? proc_read_stat(Allocator allocator, int pid) {
     String path = string::tformat("/proc/%d/stat", pid);
-    File f = file::open(path, "r")!;
-    defer (void)f.close();
-    char[256] buf;
-    sz n = f.read(&buf)!;
-    String s = ((String)buf[0:n]).copy(allocator);
-
+    File file = file::open(path, "r")!;
+    defer (void)file.close();
+    String s = read_file(allocator, file);
     sz close = s.rindex_of_char(')')!;
     sz open = s.index_of_char('(')!;
 
-    ProcStat ps;
+    ProcStat ps = {};
     ps.pid = pid;
     ps.comm = s[open+1..close].strip_suffix(")").copy(allocator);
 
@@ -405,18 +417,18 @@ fn ProcStat? proc_read_stat(Allocator allocator, int pid) {
 
 fn MemoryMap[]? proc_maps(Allocator allocator, int pid) {
     String p = string::tformat("/proc/%d/maps", pid);
-    File f = file::open(p, "r")!!;
-    defer (void)f.close();
-
-    char[4096] buf; // think about this
-    sz n = f.read(&buf)!!;
-    String[] lines = ((String)buf[0:n]).copy(allocator).split(mem, "\n");
+    File file = file::open(p, "r")!!;
+    defer (void)file.close();
+    String[] lines = read_file(allocator, file).tsplit("\n");
+    defer alloc::free(allocator, lines);
     MemoryMap[] mm = mem::alloc::alloc_array(allocator, MemoryMap, lines.len);
     int i = 0;
-    MemoryMap entry;
+    MemoryMap entry = {};
+
     foreach (line: lines) {
       if (line.len == 0) continue;
-      String[] split = line.split(allocator, " ");
+      String[] split = line.tsplit(" ");
+
       if (split.len < 5) continue;
       entry.address_range = split[0];
       entry.perms = split[1];
@@ -425,14 +437,14 @@ fn MemoryMap[]? proc_maps(Allocator allocator, int pid) {
       if (try long inode = split[4].to_long()) entry.inode = inode;
 
       if (split.len > 5) {
-          entry.pathname = string::join(allocator, split[5..], " ").trim();
+          entry.pathname = string::tjoin(split[5..], " ").trim();
       }
 
       mm[i++] = entry;
 
   }
 
-   return mm[0:i];
+   return mm[:i];
 }
 
 fn String flags_to_mode(int flags, Allocator allocator) {
@@ -475,52 +487,67 @@ fn String flags_to_mode(int flags, Allocator allocator) {
             result.append(modifiers[i]);
         }
     }
-    return result.str_view();
+    return result.tcopy_str();
 }
 
-fn OpenFile[]? proc_open_files(Allocator allocator, int pid) {
-	int[] fds = proc_fds(allocator, pid)!!;
-	String path;
-	String final_path;
-	String mode_path;
-	String mode;
-	OpenFile[] of = mem::alloc::alloc_array(allocator, OpenFile, fds.len);
-	OpenFile entry;
-	char[4096] buf;
-	char[4096] content;
-	int i = 0;
-	File file;
-	defer (void)file.close();
+fn OpenFile[]? proc_open_files(Allocator allocator, int pid){
+    int[] fds = proc_fds(allocator, pid)!!;
+    defer alloc::free(allocator, fds);
+    OpenFile[] of = mem::alloc::alloc_array(allocator, OpenFile, fds.len);
+    char[4096] link_buf;
+    char[4096] fdinfo_buf;
 
-	foreach (fd: fds) {
-		entry = {};
-		path = string::tformat("/proc/%d/fd/%d", pid, fd);
-		if (!os::native_file_or_dir_exists(path)) continue;
-		ZString zpath = path.zstr_tcopy();
-		sz n = libc::readlink(zpath, &buf, buf.len - 1);
-		if (n < 0) continue;
-		String s = ((String)buf[0:n]).copy(allocator);
-		if (s.starts_with("/") && !s.ends_with(" (deleted)")) {
-			entry.fd = fd;
-			if (os::native_file_or_dir_exists(s)) entry.path = s.copy(allocator);
-			mode_path = string::tformat("/proc/%d/fdinfo/%d", pid, fd);
-			file = file::open(mode_path, "r")!!;
-			sz len = file.read(&content)!!;
-			String[] lines = ((String)content[0:len]).copy(allocator).split(mem, "\n");
-			foreach (line: lines) {
-				String[] split = line.trim().split(allocator, ":");
-				if (split.len < 2) continue;
-				if (split[0] == "flags") {
-					if (try int flags = split[1].trim().to_int(8)) {
-					    entry.mode = flags_to_mode(flags, mem);
-					}
-				}
-			}
-			of[i++] = entry;
-		}
-	}
+    int i = 0;
 
-	return of[0:i];
+    foreach (fd : fds) {
+        OpenFile entry = {};
+        String fd_path =  string::tformat("/proc/%d/fd/%d", pid, fd);
+        if (!os::native_file_or_dir_exists(fd_path)) continue;
+
+        ZString zpath = fd_path.zstr_tcopy();
+        sz n = libc::readlink(
+            zpath,
+            &link_buf,
+            link_buf.len - 1
+        );
+
+        if (n < 0) continue;
+        String target = (String)link_buf[0:n];
+
+        if (!target.starts_with("/") || target.ends_with(" (deleted)")) {
+            continue;
+        }
+
+        if (!os::native_file_or_dir_exists(target)) continue;
+
+        entry.fd = fd;
+        entry.path = target.copy(allocator);
+
+        String info_path =
+            string::tformat("/proc/%d/fdinfo/%d", pid, fd); 
+
+	{
+            File file = file::open(info_path, "r")!!;
+            defer (void)file.close();
+            sz len = file.read(&fdinfo_buf)!!;
+            String text = (String)fdinfo_buf[0:len];
+
+            foreach (line : text.tsplit("\n")) {
+                line = line.trim();
+                if (!line.starts_with("flags:")) continue;
+                String flags_str = line["flags:".len..].trim();
+
+                if (try int flags = flags_str.to_int(8)) {
+                    entry.mode = flags_to_mode(flags, tmem);
+                }
+                break;
+            }
+        }
+	
+        of[i++] = entry;
+    }
+
+    return of[:i];
 }
 
 fn uint parse_addr(String hex) {
@@ -563,11 +590,9 @@ fn void read_connections(Allocator allocator, int pid, Protocol proto, List {Con
 
 	String path = string::tformat("/proc/%d/net/%s", pid, filename);
 	if (!os::native_file_or_dir_exists(path)) return;
-	char[65536] buf;
 	File file = file::open(path, "r")!!;
 	defer (void)file.close();
-	sz n = file.read(&buf)!!;
-	String[] lines = ((String)buf[0:n]).copy(allocator).split(allocator, "\n");
+	String[] lines = read_file(allocator, file).split(allocator, "\n");
 
 	foreach (i, line : lines) {
 		if (i == 0 || line.len == 0) continue;
@@ -598,21 +623,19 @@ fn void read_connections(Allocator allocator, int pid, Protocol proto, List {Con
 fn Connection[]? proc_connections(Allocator allocator, int pid) {
 	List{Connection} list;
 	list.init(allocator);
+	defer list.free();
 
 	read_connections(allocator, pid, Protocol.TCP,  &list);
 	read_connections(allocator, pid, Protocol.UDP,  &list);
 
-	return list.array_view();
+	return list.to_array(allocator);
 }
-
-fn ProcStatus? proc_read_status(int pid) { abort("Not Yet Implemented!"); }
 
 fn ulong proc_read_boot_time() {
 	File file = file::open("/proc/stat", "r")!!;
+	defer (void)file.close();
 	ulong btime;
-	char[8096] buf;
-	sz n = file.read(&buf)!!;
-	String[] lines = ((String)buf[:n]).split(tmem, "\n");
+	String[] lines = read_file(tmem, file).split(tmem, "\n");
 	foreach (line: lines) {
 		if (line.contains("btime")) {
 			String s = line.strip_suffix("btime ");
@@ -626,6 +649,7 @@ fn ulong proc_read_boot_time() {
 // getconf CLK_TCK
 fn ulong read_clktck() {
 	File file = file::open("/proc/self/auxv", "rb")!!;
+	defer (void)file.close();
 	char[4096] buf;
 	sz n = file.read(&buf)!!;
 
@@ -642,57 +666,50 @@ fn ulong read_clktck() {
 	return 100;
 }
 
+// re-check this impl
 fn double? proc_create_time(int pid) {
-	String p = string::tformat("/proc/%d/stat", pid);
-	File file = file::open(p, "r")!!;
-	char[4096] buf;
-	sz n = file.read(&buf)!!;
-	double start_time;
-	String raw = (String)buf[:n];
-	sz rp = raw.rindex_of(")")!!;
-	String after = raw[(rp + 2)..];
-
-	String[] fields = after.split(tmem, " ");
-	if (fields.len < 20) return 0;
-
-	if (try ulong val = fields[19].to_ulong()) {
-	ulong btime = proc_read_boot_time();
-	ulong clktck = read_clktck();
-	start_time = (double)btime + ((double)val / (double)clktck);
-	}
-	return start_time;
-
+    String p = string::tformat("/proc/%d/stat", pid);
+    File file = file::open(p, "r")!!;
+    defer (void)file.close();
+    double start_time;
+    @pool() {
+        String raw = read_file(tmem, file);
+        sz rp = raw.rindex_of(")")!!;
+        String after = raw[(rp + 2)..];
+        String[] fields = after.split(tmem, " ");
+        if (fields.len < 20) return 0;
+        if (try ulong val = fields[19].to_ulong()) {
+            ulong btime = proc_read_boot_time();
+            ulong clktck = read_clktck();
+            start_time = (double)btime + ((double)val / (double)clktck);
+        }
+    };
+    return start_time;
 }
 
 fn CpuTimes? cpu_times_parse(String path) @private {
-	CpuTimes cpu = {};
-	File file = file::open(path, "r")!!;
-	defer file.close();
-	char[4096] buf;
-	sz n = file.read(&buf)!!;
-	String raw = (String)buf[:n];
-	sz rp = raw.rindex_of(")")!!;
-	String after = raw[(rp + 2)..];
-	String[] fields = after.split(tmem, " ");
-
-	if (fields.len <= 14) {
-		return cpu;
-	}
-
-	double clktck = (double)read_clktck();
-
-	if (try double utime  = fields[11].to_double() &&
-		try double stime  = fields[12].to_double() &&
-		try double cutime = fields[13].to_double() &&
-		try double cstime = fields[14].to_double()) {
-
-		cpu.user            = utime  / clktck;
-		cpu.system          = stime  / clktck;
-		cpu.children_user   = cutime / clktck;
-		cpu.children_system = cstime / clktck;
-	}
-
-	return cpu;
+    CpuTimes cpu = {};
+    File file = file::open(path, "r")!!;
+    defer (void)file.close();
+    String raw = read_file(tmem, file);
+    sz rp = raw.rindex_of(")")!!;
+    String after = raw[(rp + 2)..];
+    @pool() {
+        String[] fields = after.split(tmem, " ");
+        if (fields.len > 14) {
+            double clktck = (double)read_clktck();
+            if (try double utime  = fields[11].to_double() &&
+                try double stime  = fields[12].to_double() &&
+                try double cutime = fields[13].to_double() &&
+                try double cstime = fields[14].to_double()) {
+                cpu.user            = utime  / clktck;
+                cpu.system          = stime  / clktck;
+                cpu.children_user   = cutime / clktck;
+                cpu.children_system = cstime / clktck;
+            }
+        }
+    };
+    return cpu;
 }
 
 fn CpuTimes? proc_cpu_times(int pid) {
@@ -715,131 +732,124 @@ fn CpuTimes? proc_cpu_times_threads(int pid, int tid) {
 }
 
 fn double? proc_cpu_percent(int pid, double interval) {
-	CpuTimes first = proc_cpu_times(pid)!!;
+    CpuTimes first = proc_cpu_times(pid)!!;
+    double proc1 = first.user + first.system;
+    ulong total1 = 0;
+    int cpu_count = 0;
+    @pool() {
+        File file1 = file::open("/proc/stat", "r")!!;
+        defer (void)file1.close();
+        String[] lines1 = read_file(tmem, file1).split(tmem, "\n");
+        foreach (i, line : lines1) {
+            if (i == 0) {
+                String[] split = line.strip_prefix("cpu ").trim().split(tmem, " ");
+                if (split.len < 8) return 0.0;
+                total1 =
+                    split[0].to_ulong()! + split[1].to_ulong()! +
+                    split[2].to_ulong()! + split[3].to_ulong()! +
+                    split[4].to_ulong()! + split[5].to_ulong()! +
+                    split[6].to_ulong()! + split[7].to_ulong()!;
+            } else if (line.starts_with("cpu")) {
+                cpu_count += 1;
+            }
+        }
+    };
 
-	double proc1 = first.user + first.system;
+    thread::sleep_ms((long)(interval * 1000));
 
-	File file1 = file::open("/proc/stat", "r")!!;
-	char[4096] buf1;
-	sz n1 = file1.read(&buf1)!!;
-	String[] lines1 = ((String)buf1[:n1]).split(tmem, "\n");
-	ulong total1 = 0;
-	int cpu_count = 0;
+    CpuTimes second = proc_cpu_times(pid)!!;
+    double proc2 = second.user + second.system;
+    ulong total2 = 0;
+    @pool() {
+        char[4096] buf2;
+        File file2 = file::open("/proc/stat", "r")!!;
+        defer (void)file2.close();
+        sz n2 = file2.read(&buf2)!!;
+        String[] lines2 = ((String)buf2[:n2]).split(tmem, "\n");
+        foreach (i, line : lines2) {
+            if (i != 0) continue;
+            String[] split = line.strip_prefix("cpu ").trim().split(tmem, " ");
+            if (split.len < 8) return 0.0;
+            total2 =
+                split[0].to_ulong()! + split[1].to_ulong()! +
+                split[2].to_ulong()! + split[3].to_ulong()! +
+                split[4].to_ulong()! + split[5].to_ulong()! +
+                split[6].to_ulong()! + split[7].to_ulong()!;
+            break;
+        }
+    };
 
-	foreach (i, line : lines1) {
-		if (i == 0) {
-			String[] split = line.strip_prefix("cpu ").trim().split(tmem, " ");
-			if (split.len < 8) return 0.0;
-			total1 =
-				split[0].to_ulong()! +
-				split[1].to_ulong()! +
-				split[2].to_ulong()! +
-				split[3].to_ulong()! +
-				split[4].to_ulong()! +
-				split[5].to_ulong()! +
-				split[6].to_ulong()! +
-				split[7].to_ulong()!;
-		}
-		else if (line.starts_with("cpu")) {
-			cpu_count += 1;
-		}
-	}
-
-	thread::sleep_ms((long)(interval * 1000));
-	CpuTimes second = proc_cpu_times(pid)!!;
-	double proc2 = second.user + second.system;
-	File file2 = file::open("/proc/stat", "r")!!;
-	char[4096] buf2;
-	sz n2 = file2.read(&buf2)!!;
-	String[] lines2 = ((String)buf2[:n2]).split(tmem, "\n");
-	ulong total2 = 0;
-
-	foreach (i, line : lines2) {
-		if (i != 0) continue;
-		String[] split = line.strip_prefix("cpu ").trim().split(tmem, " ");
-		if (split.len < 8) return 0.0;
-		total2 =
-			split[0].to_ulong()! +
-			split[1].to_ulong()! +
-			split[2].to_ulong()! +
-			split[3].to_ulong()! +
-			split[4].to_ulong()! +
-			split[5].to_ulong()! +
-			split[6].to_ulong()! +
-			split[7].to_ulong()!;
-		break;
-	}
-
-	double proc_delta = proc2 - proc1;
-	double total_delta = (double)(total2 - total1);
-	if (total_delta <= 0) return 0.0;
-	return (proc_delta / total_delta) * cpu_count * 100.0;
+    double proc_delta = proc2 - proc1;
+    double total_delta = (double)(total2 - total1);
+    if (total_delta <= 0) return 0.0;
+    return (proc_delta / total_delta) * cpu_count * 100.0;
 }
 
-fn double? proc_memory_percent(int pid) { 
-	String p = string::tformat("/proc/%d/status", pid);
-	File file = file::open(p, "r")!!;
-	char[4096] buf;
-	sz n = file.read(&buf)!!;
-	String[] lines = ((String)buf[:n]).split(tmem, "\n");
-	ulong vmrs = 0;
-	foreach (line: lines) {
-		if (line.starts_with("VmRSS")) {
-			String[] s = line.trim().split(tmem, ":");
-			if (s.len < 2) continue;
-			
-			if (try ulong v = s[1].strip_suffix(" kB").to_ulong()) vmrs = v;
-		}		
-	}
+fn double? proc_memory_percent(int pid) {
+    ulong vmrs = 0;
+    @pool() {
+        String p = string::tformat("/proc/%d/status", pid);
+        File file = file::open(p, "r")!!;
+        defer (void)file.close();
+        char[4096] buf;
+        sz n = file.read(&buf)!!;
+        String[] lines = ((String)buf[:n]).split(tmem, "\n");
+        foreach (line: lines) {
+            if (!line.starts_with("VmRSS")) continue;
+            String[] s = line.trim().split(tmem, ":");
+            if (s.len < 2) continue;
+            if (try ulong v = s[1].strip_suffix(" kB").to_ulong()) vmrs = v;
+        }
+    };
 
-	File file1 = file::open("/proc/meminfo", "r")!!;
-	char[4096] buf1;
-	sz n1 = file1.read(&buf1)!!;
-	String[] lines1 = ((String)buf1[:n1]).split(tmem, "\n");
-	ulong total_mem = 0;
+    ulong total_mem = 0;
+    @pool() {
+        File file1 = file::open("/proc/meminfo", "r")!!;
+        defer (void)file1.close();
+        char[4096] buf1;
+        sz n1 = file1.read(&buf1)!!;
+        String[] lines1 = ((String)buf1[:n1]).split(tmem, "\n");
+        foreach (line: lines1) {
+            if (!line.starts_with("MemTotal")) continue;
+            String[] s1 = line.trim().split(tmem, ":");
+            if (s1.len < 2) continue;
+            if (try ulong tv = s1[1].strip_suffix(" kB").to_ulong()) total_mem = tv;
+        }
+    };
 
-	foreach (line: lines1) {
-		if (line.starts_with("MemTotal")) {
-			String[] s1 = line.trim().split(tmem, ":");
-			if (s1.len < 2) continue;
-			if (try ulong tv = s1[1].strip_suffix(" kB").to_ulong()) total_mem = tv;
-		} 
-	}
-
-
-	if (total_mem == 0) return 0.0;
-	return ((double)vmrs / (double)total_mem) * 100.0;
+    if (total_mem == 0) return 0.0;
+    return ((double)vmrs / (double)total_mem) * 100.0;
 }
 
-fn IoCounters? proc_io_counters(int pid) { 
-	IoCounters ioc = {};
-	String p = string::tformat("/proc/%d/io", pid);
-	File file = file::open(p, "r")!!;
-	char[4096] buf;
-	sz n = file.read(&buf)!!;
-	String[] lines = ((String)buf[:n]).split(tmem, "\n");
-	
-	foreach (line : lines) {
-		String[] split = line.split(tmem, ":");
-		if (split.len < 2) continue;
-		String key = split[0].trim();
-		String value = split[1].trim();
-
-		switch (key) {
-			case "rchar":
-				if (try ulong v = value.to_ulong()) ioc.read_bytes = v;
-			case "wchar":
-				if (try ulong v = value.to_ulong()) ioc.write_bytes = v;
-			case "read_bytes":
-				if (try ulong v = value.to_ulong()) ioc.read_count = v;
-			case "write_bytes":
-				if (try ulong v = value.to_ulong()) ioc.write_count = v;
-			default:
-				continue;
-		}
-	}
-
-	return ioc;
+fn IoCounters? proc_io_counters(int pid) {
+    IoCounters ioc = {};
+    @pool() {
+        String p = string::tformat("/proc/%d/io", pid);
+        File file = file::open(p, "r")!!;
+        defer (void)file.close();
+        char[4096] buf;
+        sz n = file.read(&buf)!!;
+        String[] lines = ((String)buf[:n]).split(tmem, "\n");
+        foreach (line : lines) {
+            String[] split = line.split(tmem, ":");
+            if (split.len < 2) continue;
+            String key = split[0].trim();
+            String value = split[1].trim();
+            switch (key) {
+                case "rchar":
+                    if (try ulong v = value.to_ulong()) ioc.read_bytes = v;
+                case "wchar":
+                    if (try ulong v = value.to_ulong()) ioc.write_bytes = v;
+                case "read_bytes":
+                    if (try ulong v = value.to_ulong()) ioc.read_count = v;
+                case "write_bytes":
+                    if (try ulong v = value.to_ulong()) ioc.write_count = v;
+                default:
+                    continue;
+            }
+        }
+    };
+    return ioc;
 }
 
 constdef Signal : int {
@@ -877,57 +887,58 @@ fn bool proc_interrupt(int pid) {
     return proc_send_signal(pid, Signal.INT);
 }
 
-//TODO: improve this later
+//TODO: improve this later -- why??
 fn int[]? proc_children(Allocator allocator, int pid, bool recursive) {
-	int[] pid_list = proc_list_pids(allocator)!;
-	int[] children = mem::alloc::alloc_array(allocator, int, pid_list.len);
-	char[4096] buf;
-	String path = "";
-	int i = 0;
+    int[] pid_list = proc_list_pids(allocator)!;
+    defer alloc::free(allocator, pid_list);
 
-	foreach (p : pid_list) {
-		path = string::tformat("/proc/%d/stat", p).copy(allocator); 
-		File? file = file::open(path, "r");
+    int[] children = mem::alloc::alloc_array(allocator, int, pid_list.len);
+    char[4096] buf;
+    int i = 0;
 
-		if (catch err = file) continue;
-		defer file.close();
-		sz? n = file.read(&buf);
-		if (catch err = n) continue;
-
-		String stat = (String)buf[:n];
-		sz end_comm = stat.rindex_of(")")!;
-
-		String after = stat[end_comm + 2..];
-		String[] fields = after.split(allocator, " ");
-		if (fields.len < 2) continue;
-		int ppid = fields[1].to_int()!;
-		if (ppid == pid) {
-			children[i++] = p;
-			if (recursive) {
-				int[] sub = proc_children(allocator, p, true)!;
-				foreach (child : sub) {
-					children[i++] = child;
-				}
-			}
-		}
-	}
-
-	return children[:i];
+    foreach (p : pid_list) {
+        @pool() {
+            String path = string::tformat("/proc/%d/stat", p);
+            File? file = file::open(path, "r");
+            if (catch err = file) continue;
+            defer (void)file.close();
+            sz? n = file.read(&buf);
+            if (catch err = n) continue; // should you continue??
+            String stat = (String)buf[:n];
+            sz end_comm = stat.rindex_of(")")!;
+            String after = stat[end_comm + 2..];
+            String[] fields = after.split(tmem, " ");
+            if (fields.len < 2) continue;
+            int ppid = fields[1].to_int()!;
+            if (ppid == pid) {
+                children[i++] = p;
+                if (recursive) {
+                    int[] sub = proc_children(allocator, p, true)!;
+                    defer alloc::free(allocator, sub);
+                    foreach (child : sub) {
+                        children[i++] = child;
+                    }
+                }
+            }
+        };
+    }
+    return children[:i];
 }
 
-
-fn int? proc_parent(int pid) { 
-	String path = string::tformat("/proc/%d/stat", pid);
-	File file = file::open(path, "r")!;
-	char[4096] buf;
-	sz n = file.read(&buf)!;
-	
-	String stat = (String)buf[:n];
-	sz end_comm = stat.rindex_of(")")!;
-	String after = stat[end_comm + 2..];
-	String[] fields = after.split(tmem, " ");
-	if (fields.len < 2) return 0;
-	return fields[1].to_int()!;
+fn int? proc_parent(int pid) {
+    @pool() {
+        String path = string::tformat("/proc/%d/stat", pid);
+        File file = file::open(path, "r")!;
+        defer (void)file.close();
+        char[4096] buf;
+        sz n = file.read(&buf)!;
+        String stat = (String)buf[:n];
+        sz end_comm = stat.rindex_of(")")!;
+        String after = stat[end_comm + 2..];
+        String[] fields = after.split(tmem, " ");
+        if (fields.len < 2) return 0;
+        return fields[1].to_int()!;
+    };
 }
 
 fn int? proc_nice_get(int pid) {
@@ -956,23 +967,22 @@ struct CpuSet {
 extern fn CInt sched_setaffinity(CInt pid, usz cpusetsize, CpuSet* mask);
 extern fn CInt sched_getaffinity(CInt pid, usz cpusetsize, CpuSet* mask);
 
-fn int[]? proc_cpu_affinity_get(Allocator allocator, int pid) { 
-	CpuSet cpu_set = {};
-	int[] output = mem::alloc::alloc_array(allocator, int, 1024);
-
-	CInt out = sched_getaffinity((CInt)pid, @sizeof(cpu_set), &cpu_set);
-	if (out != 0) {
-		io::printfn("sched_getaffinity failed: %d", out);
-	}
-
-	int count = 0;
-	for (sz i = 0; i < 1024; i++) {
-		if (cpu_set.bits[i/64] & (1UL << (i % 64))) {
-			output[count++] = (int)i;
-		}
-	}
-
-	return output[:count];
+fn int[]? proc_cpu_affinity_get(Allocator allocator, int pid) {
+    CpuSet cpu_set = {};
+    CInt out = sched_getaffinity((CInt)pid, @sizeof(cpu_set), &cpu_set);
+    if (out != 0) {
+        io::printfn("sched_getaffinity failed: %d", out);
+    }
+    int count = 0;
+    int[1024] tmp;
+    for (sz i = 0; i < 1024; i++) {
+        if (cpu_set.bits[i/64] & (1UL << (i % 64))) {
+            tmp[count++] = (int)i;
+        }
+    }
+    int[] output = mem::alloc::alloc_array(allocator, int, count);
+    output[..count] = tmp[:count];
+    return output;
 }
 
 fn void proc_cpu_affinity_set(int pid, int[] cpus) {
@@ -990,72 +1000,59 @@ fn void proc_cpu_affinity_set(int pid, int[] cpus) {
 }
 
 fn RLimitEntry[]? proc_rlimits_get(Allocator allocator, int pid) {
-	String path = string::tformat("/proc/%d/limits", pid);
-	File file = file::open(path, "r")!!;
-	defer (void)file.close();
-
-	char[4096] buf;
-	sz n = file.read(&buf)!!;
-	String content = (String)buf[:n];
-
-	String[] lines = content.split(allocator, "\n");
-	RLimitEntry[] entries = mem::alloc::alloc_array(allocator, RLimitEntry, lines.len);
-	int count = 0;
-
-	foreach (line : lines[1..]) {
-	    if (line.len == 0) continue;
-
-	    String[] parts = line.trim().tsplit("  ");
-	    String[] cols;
-	    DString tmp;
-	    int pc = 0;
-
-	    String[4] filtered;
-	    foreach (p : parts) {
-		String t = p.trim();
-		if (t.len > 0) filtered[pc++] = t;
-		if (pc == 4) break;
-	    }
-
-	    if (pc < 2) continue;
-
-	    String name     = filtered[0];
-	    String soft_str = pc > 1 ? filtered[1] : "0";
-	    String hard_str = pc > 2 ? filtered[2] : "0";
-
-	    ulong soft = soft_str == "unlimited" ? ulong::max : (soft_str.to_ulong() ?? 0);
-	    ulong hard = hard_str == "unlimited" ? ulong::max : (hard_str.to_ulong() ?? 0);
-
-	    entries[count++] = {
-		.name  = name.copy(allocator),
-		.limit = { .soft = soft, .hard = hard }
-	    };
-	}
-
-	return entries[:count];
+    @pool() {
+        String path = string::tformat("/proc/%d/limits", pid);
+        File file = file::open(path, "r")!!;
+        defer (void)file.close();
+        char[4096] buf;
+        sz n = file.read(&buf)!!;
+        String content = (String)buf[:n];
+        String[] lines = content.split(tmem, "\n");
+        RLimitEntry[] entries = mem::alloc::alloc_array(allocator, RLimitEntry, lines.len);
+        int count = 0;
+        foreach (line : lines[1..]) {
+            if (line.len == 0) continue;
+            String[] parts = line.trim().tsplit("  ");
+            int pc = 0;
+            String[4] filtered;
+            foreach (p : parts) {
+                String t = p.trim();
+                if (t.len > 0) filtered[pc++] = t;
+                if (pc == 4) break;
+            }
+            if (pc < 2) continue;
+            ulong soft = filtered[1] == "unlimited" ? ulong::max : (filtered[1].to_ulong() ?? 0);
+            ulong hard = pc > 2 && filtered[2] == "unlimited" ? ulong::max : (filtered[2].to_ulong() ?? 0);
+            entries[count++] = {
+                .name  = filtered[0].copy(allocator),
+                .limit = { .soft = soft, .hard = hard }
+            };
+        }
+        return entries[:count];
+    };
 }
 
-fn ThreadInfo[]? proc_threads(Allocator allocator, int pid) { 
-	Path path = string::tformat("/proc/%d/task", pid).to_path(allocator)!;
-	PathList list = io::path::ls(allocator, path)!;
-	ThreadInfo[] ti = mem::alloc::alloc_array(allocator, ThreadInfo, list.len());
-	
-	int count = 0;
-	foreach (l: list) {
-		if (try int tid = l.to_int()) {
-			CpuTimes? ct = proc_cpu_times_threads(pid, tid);
-			if (catch err = ct) continue;
-			ti[count++] = {
-				.tid = tid,
-				.cpu_times = {
-				    .user = ct.user,
-				    .system = ct.system,
-				    .children_user = ct.children_user,
-				    .children_system = ct.children_system,
-				}
-			};
-		}
-	}
-	
-	return ti[:count];
+fn ThreadInfo[]? proc_threads(Allocator allocator, int pid) {
+    @pool() {
+        Path path = string::tformat("/proc/%d/task", pid).to_path(tmem)!;
+        PathList list = io::path::ls(tmem, path)!;
+        ThreadInfo[] ti = mem::alloc::alloc_array(allocator, ThreadInfo, list.len());
+        int count = 0;
+        foreach (l: list) {
+            if (try int tid = l.to_int()) {
+                CpuTimes? ct = proc_cpu_times_threads(pid, tid);
+                if (catch err = ct) continue;
+                ti[count++] = {
+                    .tid = tid,
+                    .cpu_times = {
+                        .user            = ct.user,
+                        .system          = ct.system,
+                        .children_user   = ct.children_user,
+                        .children_system = ct.children_system,
+                    }
+                };
+            }
+        }
+        return ti[:count];
+    };
 }
