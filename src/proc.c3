@@ -106,8 +106,8 @@ enum TcpState {
 }
 
 struct RLimit {
-    long soft;
-    long hard;
+    ulong soft;
+    ulong hard;
 }
 
 struct ThreadInfo {
@@ -664,31 +664,54 @@ fn double? proc_create_time(int pid) {
 
 }
 
-fn CpuTimes? proc_cpu_times(int pid) {  
-	CpuTimes cpu  = {};
-	String p = string::tformat("/proc/%d/stat", pid);
-	File file = file::open(p, "r")!!;
+fn CpuTimes? cpu_times_parse(String path) @private {
+	CpuTimes cpu = {};
+	File file = file::open(path, "r")!!;
+	defer file.close();
 	char[4096] buf;
 	sz n = file.read(&buf)!!;
 	String raw = (String)buf[:n];
 	sz rp = raw.rindex_of(")")!!;
 	String after = raw[(rp + 2)..];
-
 	String[] fields = after.split(tmem, " ");
-	if (fields.len <= 14) return cpu;
+
+	if (fields.len <= 14) {
+		return cpu;
+	}
+
 	double clktck = (double)read_clktck();
-	if (try double utime = fields[11].to_double() &&
-		try double stime = fields[12].to_double() &&
+
+	if (try double utime  = fields[11].to_double() &&
+		try double stime  = fields[12].to_double() &&
 		try double cutime = fields[13].to_double() &&
-		try double cstime = fields[14].to_double())
-	{
-		cpu.user = utime / clktck;
-		cpu.system = stime / clktck ;
-		cpu.children_user = cutime / clktck;
+		try double cstime = fields[14].to_double()) {
+
+		cpu.user            = utime  / clktck;
+		cpu.system          = stime  / clktck;
+		cpu.children_user   = cutime / clktck;
 		cpu.children_system = cstime / clktck;
 	}
 
-	return cpu;   		
+	return cpu;
+}
+
+fn CpuTimes? proc_cpu_times(int pid) {
+	String p = string::tformat(
+		"/proc/%d/stat",
+		pid
+	);
+
+	return cpu_times_parse(p);
+}
+
+fn CpuTimes? proc_cpu_times_threads(int pid, int tid) {
+	String p = string::tformat(
+		"/proc/%d/task/%d/stat",
+		pid,
+		tid
+	);
+
+	return cpu_times_parse(p);
 }
 
 fn double? proc_cpu_percent(int pid, double interval) {
@@ -854,11 +877,185 @@ fn bool proc_interrupt(int pid) {
     return proc_send_signal(pid, Signal.INT);
 }
 
-fn int[]? proc_children(int pid, bool recursive) { abort("Not Yet Implemented!"); }
-fn int? proc_parent(int pid) { abort("Not Yet Implemented!"); }
-fn int? proc_nice_get(int pid) { abort("Not Yet Implemented!"); }
-fn void proc_nice_set(int pid, int value) { abort("Not Yet Implemented!"); }
-fn int[]? proc_cpu_affinity_get(int pid) { abort("Not Yet Implemented!"); }
-fn void proc_cpu_affinity_set(int pid, int[] cpus) { abort("Not Yet Implemented!"); }
-fn RLimitEntry[]? proc_rlimits(int pid) { abort("Not Yet Implemented!"); }
-fn ThreadInfo[]? proc_threads(int pid) { abort("Not Yet Implemented!"); }
+//TODO: improve this later
+fn int[]? proc_children(Allocator allocator, int pid, bool recursive) {
+	int[] pid_list = proc_list_pids(allocator)!;
+	int[] children = mem::alloc::alloc_array(allocator, int, pid_list.len);
+	char[4096] buf;
+	String path = "";
+	int i = 0;
+
+	foreach (p : pid_list) {
+		path = string::tformat("/proc/%d/stat", p).copy(allocator); 
+		File? file = file::open(path, "r");
+
+		if (catch err = file) continue;
+		defer file.close();
+		sz? n = file.read(&buf);
+		if (catch err = n) continue;
+
+		String stat = (String)buf[:n];
+		sz end_comm = stat.rindex_of(")")!;
+
+		String after = stat[end_comm + 2..];
+		String[] fields = after.split(allocator, " ");
+		if (fields.len < 2) continue;
+		int ppid = fields[1].to_int()!;
+		if (ppid == pid) {
+			children[i++] = p;
+			if (recursive) {
+				int[] sub = proc_children(allocator, p, true)!;
+				foreach (child : sub) {
+					children[i++] = child;
+				}
+			}
+		}
+	}
+
+	return children[:i];
+}
+
+
+fn int? proc_parent(int pid) { 
+	String path = string::tformat("/proc/%d/stat", pid);
+	File file = file::open(path, "r")!;
+	char[4096] buf;
+	sz n = file.read(&buf)!;
+	
+	String stat = (String)buf[:n];
+	sz end_comm = stat.rindex_of(")")!;
+	String after = stat[end_comm + 2..];
+	String[] fields = after.split(tmem, " ");
+	if (fields.len < 2) return 0;
+	return fields[1].to_int()!;
+}
+
+fn int? proc_nice_get(int pid) {
+	CInt p = libc::getpriority(libc::PRIO_PROCESS, pid);
+
+	if (libc::errno() != 0) {
+		return io::FILE_NOT_FOUND~;
+	}
+
+	return (int)p;
+}
+
+fn bool proc_nice_set(int pid, int value) {
+	if (value < -20) value = -20;
+	if (value > 19) value = 19;
+
+	CInt r = libc::setpriority(libc::PRIO_PROCESS, pid, value);
+
+	return r == 0;
+}
+
+struct CpuSet {
+    ulong[16] bits;
+}
+
+extern fn CInt sched_setaffinity(CInt pid, usz cpusetsize, CpuSet* mask);
+extern fn CInt sched_getaffinity(CInt pid, usz cpusetsize, CpuSet* mask);
+
+fn int[]? proc_cpu_affinity_get(Allocator allocator, int pid) { 
+	CpuSet cpu_set = {};
+	int[] output = mem::alloc::alloc_array(allocator, int, 1024);
+
+	CInt out = sched_getaffinity((CInt)pid, @sizeof(cpu_set), &cpu_set);
+	if (out != 0) {
+		io::printfn("sched_getaffinity failed: %d", out);
+	}
+
+	int count = 0;
+	for (sz i = 0; i < 1024; i++) {
+		if (cpu_set.bits[i/64] & (1UL << (i % 64))) {
+			output[count++] = (int)i;
+		}
+	}
+
+	return output[:count];
+}
+
+fn void proc_cpu_affinity_set(int pid, int[] cpus) {
+	CpuSet cpu_set = {};
+	foreach (cpu : cpus) {
+	usz i = (usz)cpu;
+	if (i >= 1024) continue;
+	cpu_set.bits[i / 64] |= (ulong)1 << (i % 64);
+	}
+
+	CInt out = sched_setaffinity((CInt)pid, @sizeof(cpu_set), &cpu_set);
+	if (out != 0) {
+	io::printfn("sched_setaffinity failed: %d", out);
+	}
+}
+
+fn RLimitEntry[]? proc_rlimits_get(Allocator allocator, int pid) {
+	String path = string::tformat("/proc/%d/limits", pid);
+	File file = file::open(path, "r")!!;
+	defer (void)file.close();
+
+	char[4096] buf;
+	sz n = file.read(&buf)!!;
+	String content = (String)buf[:n];
+
+	String[] lines = content.split(allocator, "\n");
+	RLimitEntry[] entries = mem::alloc::alloc_array(allocator, RLimitEntry, lines.len);
+	int count = 0;
+
+	foreach (line : lines[1..]) {
+	    if (line.len == 0) continue;
+
+	    String[] parts = line.trim().tsplit("  ");
+	    String[] cols;
+	    DString tmp;
+	    int pc = 0;
+
+	    String[4] filtered;
+	    foreach (p : parts) {
+		String t = p.trim();
+		if (t.len > 0) filtered[pc++] = t;
+		if (pc == 4) break;
+	    }
+
+	    if (pc < 2) continue;
+
+	    String name     = filtered[0];
+	    String soft_str = pc > 1 ? filtered[1] : "0";
+	    String hard_str = pc > 2 ? filtered[2] : "0";
+
+	    ulong soft = soft_str == "unlimited" ? ulong::max : (soft_str.to_ulong() ?? 0);
+	    ulong hard = hard_str == "unlimited" ? ulong::max : (hard_str.to_ulong() ?? 0);
+
+	    entries[count++] = {
+		.name  = name.copy(allocator),
+		.limit = { .soft = soft, .hard = hard }
+	    };
+	}
+
+	return entries[:count];
+}
+
+fn ThreadInfo[]? proc_threads(Allocator allocator, int pid) { 
+	Path path = string::tformat("/proc/%d/task", pid).to_path(allocator)!;
+	PathList list = io::path::ls(allocator, path)!;
+	ThreadInfo[] ti = mem::alloc::alloc_array(allocator, ThreadInfo, list.len());
+	
+	int count = 0;
+	foreach (l: list) {
+		if (try int tid = l.to_int()) {
+			CpuTimes? ct = proc_cpu_times_threads(pid, tid);
+			if (catch err = ct) continue;
+			ti[count++] = {
+				.tid = tid,
+				.cpu_times = {
+				    .user = ct.user,
+				    .system = ct.system,
+				    .children_user = ct.children_user,
+				    .children_system = ct.children_system,
+				}
+			};
+		}
+	}
+	
+	return ti[:count];
+}
