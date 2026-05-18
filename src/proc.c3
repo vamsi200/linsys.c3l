@@ -6,6 +6,7 @@ import std::collections::list;
 import std::net;
 import std::os::posix;
 import std::thread;
+import std::collections::maybe;
 
 struct Process {
     int pid;
@@ -25,7 +26,7 @@ struct MemoryMap {
 
 struct ProcessInfo {
     Process process;
-    String exe_path;
+    Maybe{String} exe_path;
     String cmdline;
     int uid;
     int gid;
@@ -113,13 +114,15 @@ struct RLimitEntry {
     RLimit limit;
 }
 
-fn String read_file(Allocator allocator, File file) {
+faultdef NO_SUCH_PROCESS, PERMISSION_DENIED, PARSE_ERROR, NOT_SUPPORTED, PROCESS_EXITED, IO_ERROR;
+
+fn String? read_file(Allocator allocator, File file) {
     char[4096] temp;
     DString builder;
     builder.init(allocator);
 
     while (true) {
-        sz n = file.read(&temp)!!;
+        sz n = file.read(&temp)!;
         if (n == 0) break;
         builder.append(temp[:n]);
     }
@@ -134,13 +137,13 @@ fn ProcessInfo? get_info(Allocator allocator, int pid) {
         File file   = file::open(path, "r")!;
         defer (void)file.close();
 
-        String content = read_file(allocator, file);
+        String content = read_file(allocator, file)!;
         String[] lines = content.split(allocator, "\n");
 
         foreach (line : lines) {
             long? idx = line.index_of_char(':');
             if (catch err = idx) continue;
-            if (idx == -1) continue;
+            if (idx == -1) return PARSE_ERROR~;
 
             String key   = line[:idx].trim();
             String data  = line[idx + 1..].trim();
@@ -176,15 +179,21 @@ fn ProcessInfo? get_info(Allocator allocator, int pid) {
         }
     };
 
-    Process p = get(allocator, pid)!;
-    proc.exe_path = read_exe(allocator, pid)!;
+    Process p = get_proc(allocator, pid)!;
+    if (try String s = read_exe(allocator, pid)) {
+        proc.exe_path = { .has_value = true, .value = s };
+    } else {
+        proc.exe_path = { .has_value = false };
+    }
+
     proc.cmdline = read_cmdline(allocator, pid)!;
     proc.process = p;
 
     return proc;
 }
 
-fn Process? get(Allocator allocator, int pid) {
+
+fn Process? get_proc(Allocator allocator, int pid) {
     Process p;
 
     @pool() {
@@ -192,7 +201,7 @@ fn Process? get(Allocator allocator, int pid) {
         File file   = file::open(path, "r")!;
         defer (void)file.close();
 
-        String content = read_file(allocator, file);
+        String content = read_file(allocator, file)!;
         String[] lines = content.split(allocator, "\n");
 
         foreach (line : lines) {
@@ -230,20 +239,19 @@ fn String? read_cmdline(Allocator allocator, int pid) {
     File file   = file::open(path, "r")!;
     defer (void)file.close();
     String cmdline;
-    String content = read_file(tmem, file);
-    sz len         = content.len;
+    String content = read_file(tmem, file)!;
 
-    if (len == 0) {
+    if (content.len == 0) {
         cmdline = "";
     }
 
-    for (sz i = 0; i < len; i++) {
+    for (sz i = 0; i < content.len; i++) {
         if (content[i] == '\0') {
             content[i] = ' ';
         }
     }
 
-    return ((String)content[:len]).trim_right().copy(allocator);
+    return content.trim_right().copy(allocator);
 }
 
 fn String? read_exe(Allocator allocator, int pid) {
@@ -251,15 +259,22 @@ fn String? read_exe(Allocator allocator, int pid) {
     char[4096] buf;
 
     sz len = libc::readlink((ZString)path, &buf, buf.len - 1);
-    String exe_path;
 
-    if (len > 0) {
-        exe_path = ((String)buf[:len]).copy(allocator);
-    } else {
-        exe_path = "";
+    if (len < 0) {
+        switch (libc::errno()) {
+            case EACCES:
+            case EPERM:
+                return PERMISSION_DENIED~;
+
+            case ENOENT:
+                return PROCESS_EXITED~;
+
+            default:
+                return IO_ERROR~;
+        }
     }
 
-    return exe_path;
+    return ((String)buf[:len]).copy(allocator);
 }
 
 // NOTE: We could skip the first iter and pre-allocate with the len of list
@@ -271,7 +286,6 @@ fn int[]? list_pids(Allocator allocator) {
     PathList list = io::path::ls(allocator, p)!;
     defer catch list.free();
     sz count = 0;
-
     foreach (l : list) {
         if (try l.file_tbasename().to_int()) {
             count++;
@@ -292,7 +306,7 @@ fn int[]? list_pids(Allocator allocator) {
 
 fn bool exists(int pid) {
     int[]? list = list_pids(tmem);
-    if (catch err = list) return false; // ??
+    if (catch err = list) return false; // This is fine i guess.
 
     foreach (p : list) {
         if (p == pid) {
@@ -302,7 +316,7 @@ fn bool exists(int pid) {
     return false;
 }
 
-fn String cwd(Allocator allocator, int pid) {
+fn String? cwd(Allocator allocator, int pid) {
     char[4096] buf;
     String path = string::tformat("/proc/%d/cwd", pid);
 
@@ -317,14 +331,15 @@ fn String cwd(Allocator allocator, int pid) {
 
 fn EnvVar[]? environ(Allocator allocator, int pid) {
     String path = string::tformat("/proc/%d/environ", pid);
-
-    File file = file::open(path, "r")!;
+    EnvVar[] ev = { };
+    File file  = file::open(path, "r")!;
     defer (void)file.close();
 
-    String content = read_file(tmem, file);
-    String[] s     = content.split(tmem, "\0");
+    String content = read_file(tmem, file)!;
 
-    EnvVar[] ev = mem::alloc::alloc_array(allocator, EnvVar, s.len);
+    String[] s = content.split(tmem, "\0");
+
+    ev = mem::alloc::alloc_array(allocator, EnvVar, s.len);
 
     int i = 0;
 
@@ -397,7 +412,7 @@ fn ProcStat? read_stat(Allocator allocator, int pid) {
     String path = string::tformat("/proc/%d/stat", pid);
     File file   = file::open(path, "r")!;
     defer (void)file.close();
-    String s = read_file(allocator, file);
+    String s = read_file(allocator, file)!;
     sz close = s.rindex_of_char(')')!;
     sz open  = s.index_of_char('(')!;
 
@@ -421,10 +436,10 @@ fn MemoryMap[]? maps(Allocator allocator, int pid) {
     @pool() {
         String p = string::tformat("/proc/%d/maps", pid);
 
-        File file = file::open(p, "r")!!;
+        File file = file::open(p, "r")!;
         defer (void)file.close();
 
-        String content = read_file(tmem, file);
+        String content = read_file(tmem, file)!;
         String[] lines = content.tsplit("\n");
 
         MemoryMap[] mm = mem::alloc::alloc_array(allocator, MemoryMap, lines.len);
@@ -469,7 +484,7 @@ struct FlagInfo {
     String name;
 }
 
-fn String flags_to_mode(int flags, Allocator allocator) {
+fn String flags_to_mode(int flags, Allocator allocator) @private {
     String access;
 
     switch (flags & 3) {
@@ -506,7 +521,7 @@ fn String flags_to_mode(int flags, Allocator allocator) {
 
 fn OpenFile[]? open_files(Allocator allocator, int pid) {
     @pool() {
-        int[] fd_list = fds(tmem, pid)!!;
+        int[] fd_list = fds(tmem, pid)!;
 
         OpenFile[] of = mem::alloc::alloc_array(allocator, OpenFile, fd_list.len);
 
@@ -545,11 +560,10 @@ fn OpenFile[]? open_files(Allocator allocator, int pid) {
 
             String info_path = string::tformat("/proc/%d/fdinfo/%d", pid, fd);
 
-            File file = file::open(info_path, "r")!!;
+            File file = file::open(info_path, "r")!;
             defer (void)file.close();
 
-            sz len      = file.read(&fdinfo_buf)!!;
-            String text = (String)fdinfo_buf[0:len];
+            String text = read_file(tmem, file)!;
 
             foreach (line : text.tsplit("\n")) {
                 line = line.trim();
@@ -574,7 +588,7 @@ fn OpenFile[]? open_files(Allocator allocator, int pid) {
     };
 }
 
-fn uint parse_addr(String hex) {
+fn uint parse_addr(String hex) @private {
     uint i = (uint)hex.to_long(16) ?? 0;
     return ((i & 0xFF) << 24) | ((i & 0xFF00) << 8) | ((i & 0xFF0000) >> 8) | ((i >> 24) & 0xFF);
 }
@@ -583,7 +597,7 @@ fn String ip_to_string(Allocator allocator, uint ip) {
     return string::format(allocator, "%d.%d.%d.%d", (ip >> 24) & 0xFF, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF);
 }
 
-fn TcpState tcp_state(String hex) {
+fn TcpState tcp_state(String hex) @private{
     switch (hex) {
         case "01": return TcpState.ESTABLISHED;
         case "02": return TcpState.SYN_SENT;
@@ -601,7 +615,7 @@ fn TcpState tcp_state(String hex) {
 }
 
 // TODO: add v6 support
-fn void read_connections(Allocator allocator, int pid, Protocol proto, List{Connection}* out) {
+fn void? read_connections(Allocator allocator, int pid, Protocol proto, List{Connection}* out) {
     @pool() {
         String filename;
 
@@ -616,10 +630,10 @@ fn void read_connections(Allocator allocator, int pid, Protocol proto, List{Conn
             return;
         }
 
-        File file = file::open(path, "r")!!;
+        File file = file::open(path, "r")!;
         defer (void)file.close();
 
-        String content = read_file(tmem, file);
+        String content = read_file(tmem, file)!;
         String[] lines = content.split(tmem, "\n");
 
         foreach (i, line : lines) {
@@ -669,19 +683,19 @@ fn Connection[]? connections(Allocator allocator, int pid) {
     list.init(allocator);
     defer catch list.free();
 
-    read_connections(allocator, pid, Protocol.TCP, &list);
-    read_connections(allocator, pid, Protocol.UDP, &list);
+    read_connections(allocator, pid, Protocol.TCP, &list)!;
+    read_connections(allocator, pid, Protocol.UDP, &list)!;
 
     return list.to_array(allocator);
 }
 
-fn ulong read_boot_time() {
-    File file = file::open("/proc/stat", "r")!!;
+fn ulong? read_boot_time() {
+    File file = file::open("/proc/stat", "r")!;
     defer (void)file.close();
 
     ulong btime;
 
-    String[] lines = read_file(tmem, file).split(tmem, "\n");
+    String[] lines = read_file(tmem, file)!.split(tmem, "\n");
 
     foreach (line : lines) {
         if (line.contains("btime")) {
@@ -697,11 +711,11 @@ fn ulong read_boot_time() {
 }
 
 // getconf CLK_TCK
-fn ulong read_clktck() {
+fn ulong? read_clktck() {
     File file = file::open("/proc/self/auxv", "rb")!!;
     defer (void)file.close();
     char[4096] buf;
-    sz n = file.read(&buf)!!;
+    sz n = file.read(&buf)!;
 
     sz i = 0;
     while (i + 16 <= n) {
@@ -723,15 +737,15 @@ fn double? create_time(int pid) {
     defer (void)file.close();
 
     double start_time;
-    String raw      = read_file(tmem, file);
-    sz rp           = raw.rindex_of(")")!!;
+    String raw      = read_file(tmem, file)!;
+    sz rp           = raw.rindex_of(")")!;
     String after    = raw[(rp + 2)..];
     String[] fields = after.split(tmem, " ");
 
     if (fields.len < 20) return 0;
     if (try ulong val = fields[19].to_ulong()) {
-        ulong btime  = read_boot_time();
-        ulong clktck = read_clktck();
+        ulong btime  = read_boot_time()!;
+        ulong clktck = read_clktck()!;
         start_time = (double)btime + ((double)val / (double)clktck);
     }
     return start_time;
@@ -739,16 +753,16 @@ fn double? create_time(int pid) {
 
 fn CpuTimes? cpu_times_parse(String path) @private {
     CpuTimes cpu = { };
-    File file    = file::open(path, "r")!!;
+    File file    = file::open(path, "r")!;
     defer (void)file.close();
-    String raw = read_file(tmem, file);
-    sz rp      = raw.rindex_of(")")!!;
+    String raw = read_file(tmem, file)!;
+    sz rp      = raw.rindex_of(")")!;
 
     String after    = raw[(rp + 2)..];
     String[] fields = after.split(tmem, " ");
 
     if (fields.len > 14) {
-        double clktck = (double)read_clktck();
+        double clktck = (double)read_clktck()!;
         if (try double utime = fields[11]
             .to_double() && try double stime = fields[12]
                 .to_double() && try double cutime = fields[13]
@@ -764,26 +778,26 @@ fn CpuTimes? cpu_times_parse(String path) @private {
 
 fn CpuTimes? cpu_times(int pid) {
     String p = string::tformat("/proc/%d/stat", pid);
-    return cpu_times_parse(p);
+    return cpu_times_parse(p)!;
 }
 
 fn CpuTimes? cpu_times_threads(int pid, int tid) {
     String p = string::tformat("/proc/%d/task/%d/stat", pid, tid);
-    return cpu_times_parse(p);
+    return cpu_times_parse(p)!;
 }
 
 fn double? cpu_percent(int pid, double interval) {
     CpuTimes first = cpu_times(pid)!;
     double proc1   = first.user + first.system;
 
-    ulong total1 = read_total_cpu_time();
+    ulong total1 = read_total_cpu_time()!;
 
     thread::sleep_ms((long)(interval * 1000));
 
-    CpuTimes second = cpu_times(pid)!!;
+    CpuTimes second = cpu_times(pid)!;
     double proc2    = second.user + second.system;
 
-    ulong total2 = read_total_cpu_time();
+    ulong total2 = read_total_cpu_time()!;
 
     double delta       = proc2 - proc1;
     double total_delta = (double)(total2 - total1);
@@ -793,14 +807,11 @@ fn double? cpu_percent(int pid, double interval) {
     return (delta / total_delta) * 100.0;
 }
 
-fn ulong read_total_cpu_time() {
+fn ulong? read_total_cpu_time() {
     File file = file::open("/proc/stat", "r")!!;
     defer (void)file.close();
 
-    char[4096] buf;
-    sz n = file.read(&buf)!!;
-
-    String line = ((String)buf[:n]);
+    String line = read_file(tmem, file)!;
 
     sz i = line.index_of("cpu ")!!;
     if (i == -1) return 0;
@@ -809,20 +820,20 @@ fn ulong read_total_cpu_time() {
 
     if (split.len < 8) return 0;
 
-    return split[0].to_ulong()!! + split[1].to_ulong()!! + split[2].to_ulong()!! + split[3].to_ulong()!!
-        + split[4].to_ulong()!!
-        + split[5].to_ulong()!!
-        + split[6].to_ulong()!!
-        + split[7].to_ulong()!!;
+    return split[0].to_ulong()! + split[1].to_ulong()! + split[2].to_ulong()! + split[3].to_ulong()!
+        + split[4].to_ulong()!
+        + split[5].to_ulong()!
+        + split[6].to_ulong()!
+        + split[7].to_ulong()!;
 }
 
-fn ulong parse_proc_ulong(String path, String key) {
+fn ulong? parse_proc_ulong(String path, String key) {
     ulong result = 0;
     @pool() {
-        File file = file::open(path, "r")!!;
+        File file = file::open(path, "r")!;
         defer (void)file.close();
         char[4096] buf;
-        sz n           = file.read(&buf)!!;
+        sz n           = file.read(&buf)!;
         String[] lines = ((String)buf[:n]).split(tmem, "\n");
         foreach (line : lines) {
             if (!line.starts_with(key)) continue;
@@ -838,8 +849,8 @@ fn ulong parse_proc_ulong(String path, String key) {
 fn double? memory_percent(int pid) {
     @pool() {
         String p        = string::tformat("/proc/%d/status", pid);
-        ulong vmrs      = parse_proc_ulong(p, "VmRSS");
-        ulong total_mem = parse_proc_ulong("/proc/meminfo", "MemTotal");
+        ulong vmrs      = parse_proc_ulong(p, "VmRSS")!;
+        ulong total_mem = parse_proc_ulong("/proc/meminfo", "MemTotal")!;
         if (total_mem == 0) return 0.0;
         return ((double)vmrs / (double)total_mem) * 100.0;
     };
@@ -849,10 +860,10 @@ fn IoCounters? io_counters(int pid) {
     IoCounters ioc = { };
     @pool() {
         String path = string::tformat("/proc/%d/io", pid);
-        File file   = file::open(path, "r")!!;
+        File file   = file::open(path, "r")!;
         defer (void)file.close();
         char[4096] buf;
-        sz n           = file.read(&buf)!!;
+        sz n           = file.read(&buf)!;
         String[] lines = ((String)buf[:n]).split(tmem, "\n");
         foreach (line : lines) {
             String[] split = line.split(tmem, ":");
@@ -1018,10 +1029,10 @@ fn void cpu_affinity_set(int pid, int[] cpus) {
 fn RLimitEntry[]? rlimits_get(Allocator allocator, int pid) {
     @pool() {
         String path = string::tformat("/proc/%d/limits", pid);
-        File file   = file::open(path, "r")!!;
+        File file   = file::open(path, "r")!;
         defer (void)file.close();
         char[4096] buf;
-        sz n           = file.read(&buf)!!;
+        sz n           = file.read(&buf)!;
         String content = (String)buf[:n];
         String[] lines = content.split(tmem, "\n");
 
@@ -1052,22 +1063,24 @@ fn ThreadInfo[]? threads(Allocator allocator, int pid) {
         Path path     = string::tformat("/proc/%d/task", pid).to_path(tmem)!;
         PathList list = io::path::ls(tmem, path)!;
 
-        List {ThreadInfo} ti;
+        List{ThreadInfo} ti;
         ti.init(allocator);
 
         foreach (l : list) {
             if (try int tid = l.basename().to_int()) {
                 CpuTimes? ct = cpu_times_threads(pid, tid);
                 if (catch ct) continue;
-                ti.push({
-                    .tid = tid,
-                    .cpu_times = {
-                        .user            = ct.user,
-                        .system          = ct.system,
-                        .children_user   = ct.children_user,
-                        .children_system = ct.children_system,
+                ti.push(
+                    {
+                        .tid = tid,
+                        .cpu_times = {
+                            .user = ct.user,
+                            .system = ct.system,
+                            .children_user = ct.children_user,
+                            .children_system = ct.children_system,
+                        }
                     }
-                });
+                );
             }
         }
         return ti.to_array(allocator);

@@ -4,7 +4,8 @@ import proc;
 import std::thread;
 
 fn int main(String[] args) {
-        ThreadInfo[] ti = proc::threads(tmem, 3022)!!;
-        foreach (t: ti) io::printn(t);
+    // ProcessInfo? pi = proc::get_info(tmem, 1);
+    bool exists = proc::exists(123423);
+    io::printn(exists);
     return 0;
 }
