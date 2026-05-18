@@ -6,7 +6,6 @@ import std::collections::list;
 import std::net;
 import std::os::posix;
 import std::thread;
-import std::collections::maybe;
 
 struct Process {
     int pid;
@@ -26,23 +25,13 @@ struct MemoryMap {
 
 struct ProcessInfo {
     Process process;
-    Maybe{String} exe_path;
+    String exe_path;
     String cmdline;
     int uid;
     int gid;
     int threads;
-    long vm_size;
-    long vm_rss;
-}
-
-struct ProcStat {
-    int pid;
-    String comm;
-    char state;
-    int ppid;
-    int pgrp;
-    int session;
-    int tty_nr;
+    ulong vm_size;
+    ulong vm_rss;
 }
 
 struct CpuTimes {
@@ -114,12 +103,13 @@ struct RLimitEntry {
     RLimit limit;
 }
 
-faultdef NO_SUCH_PROCESS, PERMISSION_DENIED, PARSE_ERROR, NOT_SUPPORTED, PROCESS_EXITED, IO_ERROR;
+faultdef
+    NO_SUCH_PROCESS, PERMISSION_DENIED, PARSE_ERROR, NOT_SUPPORTED, PROCESS_EXITED, IO_ERROR, SCHED_NO_SUCH_PROCESS, SCHED_PERMISSION_DENIED, SCHED_INVALID, NICE_PERMISSION_DENIED, NICE_NO_SUCH_PROCESS, NICE_INVALID
+;
 
 fn String? read_file(Allocator allocator, File file) {
     char[4096] temp;
-    DString builder;
-    builder.init(allocator);
+    DString builder = dstring::new_with_capacity(allocator, 4096);
 
     while (true) {
         sz n = file.read(&temp)!;
@@ -132,6 +122,8 @@ fn String? read_file(Allocator allocator, File file) {
 
 fn ProcessInfo? get_info(Allocator allocator, int pid) {
     ProcessInfo proc = { };
+    Process p        = { };
+
     @pool() {
         String path = string::tformat("/proc/%d/status", pid);
         File file   = file::open(path, "r")!;
@@ -143,7 +135,7 @@ fn ProcessInfo? get_info(Allocator allocator, int pid) {
         foreach (line : lines) {
             long? idx = line.index_of_char(':');
             if (catch err = idx) continue;
-            if (idx == -1) return PARSE_ERROR~;
+            if (idx == -1) continue;
 
             String key   = line[:idx].trim();
             String data  = line[idx + 1..].trim();
@@ -163,28 +155,29 @@ fn ProcessInfo? get_info(Allocator allocator, int pid) {
                     first = gid_idx == -1 ? first : first[:gid_idx];
                     if (try int gid = first.to_int()) proc.gid = gid;
 
-                case "VmSize":
-                    long vms_idx = first.index_of_char(' ')!;
-                    first = vms_idx == -1 ? first : first[:vms_idx];
-                    if (try long vms = first.to_long()) proc.vm_size = vms;
+                case "Pid":
+                    p.pid = data.to_int()!;
 
-                case "VmRSS":
-                    long vmrss_idx = first.index_of_char(' ')!;
-                    first = vmrss_idx == -1 ? first : first[:vmrss_idx];
-                    if (try long vmrss = first.to_long()) proc.vm_rss = vmrss;
+                case "PPid":
+                    p.ppid = data.to_int()!;
+
+                case "Name":
+                    p.name = data.copy(allocator);
+
+                case "State":
+                    p.state = data[0];
 
                 default:
                     continue;
             }
         }
+
+        String status_path = string::tformat("/proc/%d/status", pid);
+        proc.vm_size = parse_proc_ulong(status_path, "VmSize")!;
+        proc.vm_rss = parse_proc_ulong(status_path, "VmRSS")!;
     };
 
-    Process p = get_proc(allocator, pid)!;
-    if (try String s = read_exe(allocator, pid)) {
-        proc.exe_path = { .has_value = true, .value = s };
-    } else {
-        proc.exe_path = { .has_value = false };
-    }
+    proc.exe_path = read_exe(allocator, pid)!;
 
     proc.cmdline = read_cmdline(allocator, pid)!;
     proc.process = p;
@@ -238,21 +231,17 @@ fn String? read_cmdline(Allocator allocator, int pid) {
     String path = string::tformat("/proc/%d/cmdline", pid);
     File file   = file::open(path, "r")!;
     defer (void)file.close();
-    String cmdline;
     String content = read_file(tmem, file)!;
 
-    if (content.len == 0) {
-        cmdline = "";
-    }
+    if (content.len == 0) return "".copy(allocator);
 
     for (sz i = 0; i < content.len; i++) {
-        if (content[i] == '\0') {
-            content[i] = ' ';
-        }
+        if (content[i] == '\0') content[i] = ' ';
     }
 
     return content.trim_right().copy(allocator);
 }
+
 
 fn String? read_exe(Allocator allocator, int pid) {
     String path = string::tformat("/proc/%d/exe", pid);
@@ -305,15 +294,8 @@ fn int[]? list_pids(Allocator allocator) {
 }
 
 fn bool exists(int pid) {
-    int[]? list = list_pids(tmem);
-    if (catch err = list) return false; // This is fine i guess.
-
-    foreach (p : list) {
-        if (p == pid) {
-            return true;
-        }
-    }
-    return false;
+    String path = string::tformat("/proc/%d", pid);
+    return os::native_file_or_dir_exists(path);
 }
 
 fn String? cwd(Allocator allocator, int pid) {
@@ -322,8 +304,19 @@ fn String? cwd(Allocator allocator, int pid) {
 
     sz len = libc::readlink((ZString)path, &buf, buf.len - 1);
 
-    if (len <= 0) {
-        return "";
+    if (len == 0) return "".copy(allocator);
+    if (len < 0) {
+        switch (libc::errno()) {
+            case EACCES:
+            case EPERM:
+                return PERMISSION_DENIED~;
+
+            case ENOENT:
+                return PROCESS_EXITED~;
+
+            default:
+                return IO_ERROR~;
+        }
     }
 
     return ((String)buf[:len]).copy(allocator);
@@ -332,7 +325,7 @@ fn String? cwd(Allocator allocator, int pid) {
 fn EnvVar[]? environ(Allocator allocator, int pid) {
     String path = string::tformat("/proc/%d/environ", pid);
     EnvVar[] ev = { };
-    File file  = file::open(path, "r")!;
+    File file   = file::open(path, "r")!;
     defer (void)file.close();
 
     String content = read_file(tmem, file)!;
@@ -405,31 +398,6 @@ fn int[]? fds(Allocator allocator, int pid) {
 
         return fds[:i];
     };
-}
-
-// Should I even keep this function and the struct???
-fn ProcStat? read_stat(Allocator allocator, int pid) {
-    String path = string::tformat("/proc/%d/stat", pid);
-    File file   = file::open(path, "r")!;
-    defer (void)file.close();
-    String s = read_file(allocator, file)!;
-    sz close = s.rindex_of_char(')')!;
-    sz open  = s.index_of_char('(')!;
-
-    ProcStat ps = { };
-    ps.pid = pid;
-    ps.comm = s[open + 1..close].strip_suffix(")").copy(allocator);
-
-    String rest     = s[close + 2..];
-    String[] fields = rest.split(allocator, " ");
-    if (fields.len < 3) return string::CONVERSION_FAILED~;
-
-    ps.state = fields[0][0];
-    if (try int ppid = fields[1].to_int()) ps.ppid = ppid;
-    if (try int pgrp = fields[2].to_int()) ps.pgrp = pgrp;
-    if (try int tty = fields[4].to_int()) ps.tty_nr = tty;
-
-    return ps;
 }
 
 fn MemoryMap[]? maps(Allocator allocator, int pid) {
@@ -597,7 +565,7 @@ fn String ip_to_string(Allocator allocator, uint ip) {
     return string::format(allocator, "%d.%d.%d.%d", (ip >> 24) & 0xFF, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF);
 }
 
-fn TcpState tcp_state(String hex) @private{
+fn TcpState tcp_state(String hex) @private {
     switch (hex) {
         case "01": return TcpState.ESTABLISHED;
         case "02": return TcpState.SYN_SENT;
@@ -712,7 +680,7 @@ fn ulong? read_boot_time() {
 
 // getconf CLK_TCK
 fn ulong? read_clktck() {
-    File file = file::open("/proc/self/auxv", "rb")!!;
+    File file = file::open("/proc/self/auxv", "rb")!;
     defer (void)file.close();
     char[4096] buf;
     sz n = file.read(&buf)!;
@@ -733,7 +701,7 @@ fn ulong? read_clktck() {
 // re-check this impl
 fn double? create_time(int pid) {
     String p  = string::tformat("/proc/%d/stat", pid);
-    File file = file::open(p, "r")!!;
+    File file = file::open(p, "r")!;
     defer (void)file.close();
 
     double start_time;
@@ -742,7 +710,7 @@ fn double? create_time(int pid) {
     String after    = raw[(rp + 2)..];
     String[] fields = after.split(tmem, " ");
 
-    if (fields.len < 20) return 0;
+    if (fields.len < 20) return PARSE_ERROR~;
     if (try ulong val = fields[19].to_ulong()) {
         ulong btime  = read_boot_time()!;
         ulong clktck = read_clktck()!;
@@ -808,12 +776,12 @@ fn double? cpu_percent(int pid, double interval) {
 }
 
 fn ulong? read_total_cpu_time() {
-    File file = file::open("/proc/stat", "r")!!;
+    File file = file::open("/proc/stat", "r")!;
     defer (void)file.close();
 
     String line = read_file(tmem, file)!;
 
-    sz i = line.index_of("cpu ")!!;
+    sz i = line.index_of("cpu ")!;
     if (i == -1) return 0;
 
     String[] split = line[(i + 4)..].trim().split(tmem, " ");
@@ -917,38 +885,39 @@ fn bool interrupt(int pid) {
     return send_signal(pid, Signal.INT);
 }
 
-// TODO: improve this later -- why??
 fn int[]? children(Allocator allocator, int pid, bool recursive) {
-    int[] pid_list = list_pids(allocator)!;
-    defer alloc::free(allocator, pid_list);
-
     List{int} result;
     result.init(allocator);
 
-    char[4096] buf;
-    foreach (p : pid_list) {
-        @pool() {
-            String path = string::tformat("/proc/%d/stat", p);
-            File? file  = file::open(path, "r");
-            if (catch file) continue;
-            defer (void)file.close();
-            sz? n = file.read(&buf);
-            if (catch n) continue;
-            String stat     = (String)buf[:n];
-            sz end_comm     = stat.rindex_of(")")!;
-            String after    = stat[end_comm + 2..];
-            String[] fields = after.split(tmem, " ");
-            if (fields.len < 2) continue;
-            int ppid = fields[1].to_int()!;
-            if (ppid != pid) continue;
-            result.push(p);
-            if (recursive) {
-                int[] sub = children(allocator, p, true)!;
-                defer alloc::free(allocator, sub);
-                foreach (child : sub) result.push(child);
-            }
-        };
+    List{int} queue;
+    queue.init(tmem);
+    queue.push(pid);
+    int[] pid_list = list_pids(tmem)!;
+
+    while (queue.len() > 0) {
+        int current = queue.pop()!;
+        char[4096] buf;
+        foreach (p : pid_list) {
+            @pool() {
+                String path = string::tformat("/proc/%d/stat", p);
+                File? file  = file::open(path, "r");
+                if (catch file) continue;
+                defer (void)file.close();
+                sz? n = file.read(&buf);
+                if (catch n) continue;
+                String stat     = (String)buf[:n];
+                sz end_comm     = stat.rindex_of(")")!;
+                String after    = stat[end_comm + 2..];
+                String[] fields = after.split(tmem, " ");
+                if (fields.len < 2) continue;
+                int ppid = fields[1].to_int()!;
+                if (ppid != current) continue;
+                result.push(p);
+                if (recursive) queue.push(p);
+            };
+        }
     }
+
     return result.to_array(allocator);
 }
 
@@ -970,21 +939,25 @@ fn int? parent(int pid) {
 
 fn int? nice_get(int pid) {
     CInt p = libc::getpriority(libc::PRIO_PROCESS, pid);
-
     if (libc::errno() != 0) {
-        return io::FILE_NOT_FOUND~;
+        switch (libc::errno()) {
+            case ESRCH: return NICE_NO_SUCH_PROCESS~;
+            case EPERM: return NICE_PERMISSION_DENIED~;
+            default: return NICE_INVALID~;
+        }
     }
-
     return (int)p;
 }
 
-fn bool nice_set(int pid, int value) {
-    if (value < -20) value = -20;
-    if (value > 19) value = 19;
-
-    CInt r = libc::setpriority(libc::PRIO_PROCESS, pid, value);
-
-    return r == 0;
+fn void? nice_set(int pid, int value) {
+    value = value < -20 ? -20 : (value > 19 ? 19 : value);
+    if (libc::setpriority(libc::PRIO_PROCESS, pid, value) != 0) {
+        switch (libc::errno()) {
+            case ESRCH: return NICE_NO_SUCH_PROCESS~;
+            case EPERM: return NICE_PERMISSION_DENIED~;
+            default: return NICE_INVALID~;
+        }
+    }
 }
 
 struct CpuSet {
@@ -996,10 +969,14 @@ extern fn CInt sched_getaffinity(CInt pid, usz cpusetsize, CpuSet* mask);
 
 fn int[]? cpu_affinity_get(Allocator allocator, int pid) {
     CpuSet cpu_set = { };
-    CInt out       = sched_getaffinity((CInt)pid, @sizeof(cpu_set), &cpu_set);
-    if (out != 0) {
-        io::printfn("sched_getaffinity failed: %d", out);
+    if (sched_getaffinity((CInt)pid, @sizeof(cpu_set), &cpu_set) != 0) {
+        switch (libc::errno()) {
+            case ESRCH: return SCHED_NO_SUCH_PROCESS~;
+            case EPERM: return SCHED_PERMISSION_DENIED~;
+            default: return SCHED_INVALID~;
+        }
     }
+
     int count = 0;
     int[1024] tmp;
     for (sz i = 0; i < 1024; i++) {
@@ -1012,7 +989,7 @@ fn int[]? cpu_affinity_get(Allocator allocator, int pid) {
     return output;
 }
 
-fn void cpu_affinity_set(int pid, int[] cpus) {
+fn void? cpu_affinity_set(int pid, int[] cpus) {
     CpuSet cpu_set = { };
     foreach (cpu : cpus) {
         usz i = (usz)cpu;
@@ -1020,9 +997,12 @@ fn void cpu_affinity_set(int pid, int[] cpus) {
         cpu_set.bits[i / 64] |= (ulong)1 << (i % 64);
     }
 
-    CInt out = sched_setaffinity((CInt)pid, @sizeof(cpu_set), &cpu_set);
-    if (out != 0) {
-        io::printfn("sched_setaffinity failed: %d", out);
+    if (sched_setaffinity((CInt)pid, @sizeof(cpu_set), &cpu_set) != 0) {
+        switch (libc::errno()) {
+            case ESRCH: return SCHED_NO_SUCH_PROCESS~;
+            case EPERM: return SCHED_PERMISSION_DENIED~;
+            default: return SCHED_INVALID~;
+        }
     }
 }
 
@@ -1031,9 +1011,7 @@ fn RLimitEntry[]? rlimits_get(Allocator allocator, int pid) {
         String path = string::tformat("/proc/%d/limits", pid);
         File file   = file::open(path, "r")!;
         defer (void)file.close();
-        char[4096] buf;
-        sz n           = file.read(&buf)!;
-        String content = (String)buf[:n];
+        String content = read_file(allocator, file)!;
         String[] lines = content.split(tmem, "\n");
 
         List{RLimitEntry} entries;
