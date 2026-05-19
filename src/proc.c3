@@ -11,7 +11,21 @@ struct Process {
     int pid;
     int ppid;
     String name;
-    char state;
+    ProcState state;
+}
+
+enum ProcState {
+    RUNNING,
+    SLEEPING,
+    DISK_SLEEP,
+    ZOMBIE,
+    STOPPED,
+    TRACING_STOP,
+    DEAD,
+    IDLE,
+    PARKED,
+    WAKE_KILL,
+    WAKING,
 }
 
 struct MemoryMap {
@@ -143,48 +157,72 @@ fn ProcessInfo? get_info(Allocator allocator, int pid) {
 
             switch (key) {
                 case "Threads":
-                    proc.threads = data.to_int()!;
+                    if (try int threads = data.to_int()) proc.threads = threads;
 
                 case "Uid":
-                    long uid_idx = first.index_of_char('\t')!;
-                    first = uid_idx == -1 ? first : first[:uid_idx];
-                    if (try int uid = first.to_int()) proc.uid = uid;
+                    if (try long uid_idx = first.index_of_char('\t')) {
+                        first = uid_idx == -1 ? first : first[:uid_idx];
+                        if (try int uid = first.to_int()) proc.uid = uid;
+                    }
 
                 case "Gid":
-                    long gid_idx = first.index_of_char('\t')!;
-                    first = gid_idx == -1 ? first : first[:gid_idx];
-                    if (try int gid = first.to_int()) proc.gid = gid;
+                    if (try long gid_idx = first.index_of_char('\t')) {
+                        first = gid_idx == -1 ? first : first[:gid_idx];
+                        if (try int gid = first.to_int()) proc.gid = gid;
+                    }
 
                 case "Pid":
-                    p.pid = data.to_int()!;
+                    if (try int parse_pid = data.to_int()) p.pid = parse_pid;
 
                 case "PPid":
-                    p.ppid = data.to_int()!;
+                    if (try int parse_ppid = data.to_int()) p.ppid = parse_ppid;
 
                 case "Name":
                     p.name = data.copy(allocator);
 
+                case "VmSize":
+                    if (try long vms_idx = first.index_of_char(' ')) {
+                        first = vms_idx == -1 ? first : first[:vms_idx];
+                        if (try ulong vms = first.to_ulong()) proc.vm_size = vms;
+                    }
+
+                case "VmRSS":
+                    if (try long vmrss_idx = first.index_of_char(' ')) {
+                        first = vmrss_idx == -1 ? first : first[:vmrss_idx];
+                        if (try ulong vmrss = first.to_ulong()) proc.vm_rss = vmrss;
+                    }
                 case "State":
-                    p.state = data[0];
+                    p.state = proc_state((char)data[0]);
 
                 default:
                     continue;
             }
         }
-
-        String status_path = string::tformat("/proc/%d/status", pid);
-        proc.vm_size = parse_proc_ulong(status_path, "VmSize")!;
-        proc.vm_rss = parse_proc_ulong(status_path, "VmRSS")!;
     };
 
-    proc.exe_path = read_exe(allocator, pid)!;
-
-    proc.cmdline = read_cmdline(allocator, pid)!;
+    proc.exe_path = read_exe(allocator, pid) ?? "";
+    proc.cmdline = read_cmdline(allocator, pid) ?? "";
     proc.process = p;
 
     return proc;
 }
 
+fn ProcState proc_state(char c) {
+    switch (c) {
+        case 'R': return ProcState.RUNNING;
+        case 'S': return ProcState.SLEEPING;
+        case 'D': return ProcState.DISK_SLEEP;
+        case 'Z': return ProcState.ZOMBIE;
+        case 'T': return ProcState.STOPPED;
+        case 't': return ProcState.TRACING_STOP;
+        case 'X': return ProcState.DEAD;
+        case 'I': return ProcState.IDLE;
+        case 'P': return ProcState.PARKED;
+        case 'K': return ProcState.WAKE_KILL;
+        case 'W': return ProcState.WAKING;
+        default: return ProcState.RUNNING;
+    }
+}
 
 fn Process? get_proc(Allocator allocator, int pid) {
     Process p;
@@ -207,16 +245,16 @@ fn Process? get_proc(Allocator allocator, int pid) {
 
             switch (key) {
                 case "Pid":
-                    p.pid = data.to_int()!;
+                    if (try parse_pid = data.to_int()) p.pid = parse_pid;
 
                 case "PPid":
-                    p.ppid = data.to_int()!;
+                    if (try parse_ppid = data.to_int()) p.ppid = parse_ppid;
 
                 case "Name":
                     p.name = data.copy(allocator);
 
                 case "State":
-                    p.state = data[0];
+                    p.state = proc_state((char)data[0]);
 
                 default:
                     continue;
@@ -233,6 +271,7 @@ fn String? read_cmdline(Allocator allocator, int pid) {
     defer (void)file.close();
     String content = read_file(tmem, file)!;
 
+    // It is common - there would be no cmdline in many cases.
     if (content.len == 0) return "".copy(allocator);
 
     for (sz i = 0; i < content.len; i++) {
@@ -241,7 +280,6 @@ fn String? read_cmdline(Allocator allocator, int pid) {
 
     return content.trim_right().copy(allocator);
 }
-
 
 fn String? read_exe(Allocator allocator, int pid) {
     String path = string::tformat("/proc/%d/exe", pid);
@@ -266,8 +304,6 @@ fn String? read_exe(Allocator allocator, int pid) {
     return ((String)buf[:len]).copy(allocator);
 }
 
-// NOTE: We could skip the first iter and pre-allocate with the len of list
-// so it could be slight perf imp vs memory usage, will need to check furthur.
 fn int[]? list_pids(Allocator allocator) {
     Path p = io::path::new(allocator, "/proc")!;
     defer alloc::free(allocator, p);
@@ -366,6 +402,7 @@ fn String[]? fd_paths(Allocator allocator, int pid) {
         int i = 0;
 
         foreach (l : list) {
+            // its okay to hardfail here
             String full   = string::tformat("%s/%s", proc_fd, l.file_tbasename()!);
             ZString zpath = full.zstr_tcopy();
             sz n          = libc::readlink(zpath, &buf, buf.len - 1);
@@ -708,7 +745,7 @@ fn double? create_time(int pid) {
     String raw      = read_file(tmem, file)!;
     sz rp           = raw.rindex_of(")")!;
     String after    = raw[(rp + 2)..];
-    String[] fields = after.split(tmem, " ");
+    String[] fields = parse_proc_stat_fields(tmem, raw)!;
 
     if (fields.len < 20) return PARSE_ERROR~;
     if (try ulong val = fields[19].to_ulong()) {
@@ -719,15 +756,31 @@ fn double? create_time(int pid) {
     return start_time;
 }
 
+fn String[]? parse_proc_stat_fields(Allocator allocator, String raw) @private {
+    sz rp = raw.rindex_of(")")!;
+
+    String after = raw[(rp + 2)..];
+
+    String[] raw_fields = after.split(allocator, " ");
+
+    List{String} fields;
+    fields.init(allocator);
+
+    foreach (f : raw_fields) {
+        if (f.len > 0) {
+            fields.push(f);
+        }
+    }
+
+    return fields.to_array(allocator);
+}
+
 fn CpuTimes? cpu_times_parse(String path) @private {
     CpuTimes cpu = { };
     File file    = file::open(path, "r")!;
     defer (void)file.close();
     String raw = read_file(tmem, file)!;
-    sz rp      = raw.rindex_of(")")!;
-
-    String after    = raw[(rp + 2)..];
-    String[] fields = after.split(tmem, " ");
+    String[] fields = parse_proc_stat_fields(tmem, raw)!;
 
     if (fields.len > 14) {
         double clktck = (double)read_clktck()!;
@@ -929,9 +982,7 @@ fn int? parent(int pid) {
         char[4096] buf;
         sz n            = file.read(&buf)!;
         String stat     = (String)buf[:n];
-        sz end_comm     = stat.rindex_of(")")!;
-        String after    = stat[end_comm + 2..];
-        String[] fields = after.split(tmem, " ");
+        String[] fields = parse_proc_stat_fields(tmem, stat)!;
         if (fields.len < 2) return 0;
         return fields[1].to_int()!;
     };
