@@ -1,0 +1,34 @@
+{
+  "provides": "linsys",
+  "sources": [
+    "src/**"
+  ],
+  "linklib-dir": "linked-libs",
+  "targets": {
+    "linux-aarch64": {
+      "link-args": [],
+      "dependencies": [],
+      "linked-libraries": []
+    },
+    "linux-riscv32": {
+      "link-args": [],
+      "dependencies": [],
+      "linked-libraries": []
+    },
+    "linux-riscv64": {
+      "link-args": [],
+      "dependencies": [],
+      "linked-libraries": []
+    },
+    "linux-x86": {
+      "link-args": [],
+      "dependencies": [],
+      "linked-libraries": []
+    },
+    "linux-x64": {
+      "link-args": [],
+      "dependencies": [],
+      "linked-libraries": []
+    }
+  }
+}
