@@ -1,5 +1,5 @@
+module sys;
 import std::io;
-import proc;
 import std::io::file;
 import libc;
 import std::core::string;
@@ -73,13 +73,10 @@ struct CpuTemp {
     double critical;
 }
 
-// later merge both proc and this
-faultdef PARSE_ERROR;
-
-fn SystemCpuTimes? cpu_times() {
+fn SystemCpuTimes? sys_cpu_times() {
     File file = file::open("/proc/stat", "r")!;
     defer (void)file.close();
-    String content = proc::read_file(tmem, file)!;
+    String content = read_file(tmem, file)!;
 
     foreach (line : content.split(tmem, "\n")) {
         if (!line.starts_with("cpu ")) continue;
@@ -106,7 +103,7 @@ fn SystemCpuTimes? cpu_times() {
 fn SystemCpuTimes[]? cpu_times_percpu(Allocator allocator) {
     File file = file::open("/proc/stat", "r")!;
     defer (void)file.close();
-    String content = proc::read_file(tmem, file)!;
+    String content = read_file(tmem, file)!;
     List{SystemCpuTimes} cpus;
     cpus.init(allocator);
 
@@ -145,7 +142,7 @@ fn SystemCpuTimes[]? cpu_times_percpu(Allocator allocator) {
 fn CpuSnapshot? cpu_snapshot() {
     File file = file::open("/proc/stat", "r")!;
     defer (void)file.close();
-    String content = proc::read_file(tmem, file)!;
+    String content = read_file(tmem, file)!;
 
     foreach (line : content.split(tmem, "\n")) {
         if (!line.starts_with("cpu ")) {
@@ -179,7 +176,7 @@ fn CpuSnapshot? cpu_snapshot() {
 fn CpuSnapshot[]? cpu_snapshot_percpu(Allocator allocator) {
     File file = file::open("/proc/stat", "r")!;
     defer (void)file.close();
-    String content = proc::read_file(tmem, file)!;
+    String content = read_file(tmem, file)!;
     List{CpuSnapshot} cs;
     cs.init(allocator);
 
@@ -205,7 +202,7 @@ fn CpuSnapshot[]? cpu_snapshot_percpu(Allocator allocator) {
     return cs.to_array(allocator);
 }
 
-fn double cpu_percent(CpuSnapshot old, CpuSnapshot new) {
+fn double sys_cpu_percent(CpuSnapshot old, CpuSnapshot new) {
     ulong total_delta = new.total - old.total;
     ulong idle_delta  = new.idle - old.idle;
 
@@ -216,7 +213,7 @@ fn double cpu_percent(CpuSnapshot old, CpuSnapshot new) {
     return ((double)(total_delta - idle_delta) / (double)total_delta) * 100.0;
 }
 
-fn double[]? cpu_percent_percpu(Allocator allocator, CpuSnapshot[] old, CpuSnapshot[] new) {
+fn double[]? sys_cpu_percent_percpu(Allocator allocator, CpuSnapshot[] old, CpuSnapshot[] new) {
     if (old.len != new.len) {
         return PARSE_ERROR~;
     }
@@ -245,7 +242,7 @@ fn CpuCount? cpu_count() {
         File file = file::open("/proc/cpuinfo", "r")!;
         defer (void)file.close();
 
-        String content = proc::read_file(tmem, file)!;
+        String content = read_file(tmem, file)!;
 
         int logical = 0;
 
@@ -304,11 +301,11 @@ fn CpuFreq? cpu_freq() {
         File max = file::open(max_path, "r")!;
         defer (void)max.close();
 
-        cf.current = ((double)(proc::read_file(tmem, cur)!.trim().to_ulong() ?? 0) / 1000.0);
+        cf.current = ((double)(read_file(tmem, cur)!.trim().to_ulong() ?? 0) / 1000.0);
 
-        cf.min = ((double)(proc::read_file(tmem, min)!.trim().to_ulong() ?? 0) / 1000.0);
+        cf.min = ((double)(read_file(tmem, min)!.trim().to_ulong() ?? 0) / 1000.0);
 
-        cf.max = ((double)(proc::read_file(tmem, max)!.trim().to_ulong() ?? 0) / 1000.0);
+        cf.max = ((double)(read_file(tmem, max)!.trim().to_ulong() ?? 0) / 1000.0);
 
         return cf;
     };
@@ -358,9 +355,9 @@ fn CpuFreq[]? cpu_freq_percpu(Allocator allocator) {
                 }
                 defer (void)max.close();
 
-                freqs.push({ .current = ((double)(proc::read_file(tmem, cur)!.trim()
-                    .to_ulong() ?? 0) / 1000.0), .min = ((double)(proc::read_file(tmem, min)!.trim()
-                        .to_ulong() ?? 0) / 1000.0), .max = ((double)(proc::read_file(tmem, max)!.trim()
+                freqs.push({ .current = ((double)(read_file(tmem, cur)!.trim()
+                    .to_ulong() ?? 0) / 1000.0), .min = ((double)(read_file(tmem, min)!.trim()
+                        .to_ulong() ?? 0) / 1000.0), .max = ((double)(read_file(tmem, max)!.trim()
                             .to_ulong() ?? 0) / 1000.0), });
             }
         }
@@ -374,7 +371,7 @@ fn CpuStats? cpu_stats() {
         File file = file::open("/proc/stat", "r")!;
         defer (void)file.close();
 
-        String content = proc::read_file(tmem, file)!;
+        String content = read_file(tmem, file)!;
 
         CpuStats stats = { };
 
@@ -410,7 +407,7 @@ fn LoadAvg? loadavg() {
         File file = file::open("/proc/loadavg", "r")!;
         defer (void)file.close();
 
-        String content = proc::read_file(tmem, file)!;
+        String content = read_file(tmem, file)!;
 
         String[] fields = content.split(tmem, " ");
 
@@ -433,7 +430,7 @@ fn CpuInfo[]? cpu_info(Allocator allocator) {
         File file = file::open("/proc/cpuinfo", "r")!;
         defer (void)file.close();
 
-        String content = proc::read_file(tmem, file)!;
+        String content = read_file(tmem, file)!;
 
         List{CpuInfo} infos;
         infos.init(allocator);
@@ -525,9 +522,9 @@ fn CpuTemp[]? cpu_temps(Allocator allocator) {
             }
             defer (void)ty.close();
 
-            double current = ((double)(proc::read_file(tmem, tf)!.trim().to_long() ?? 0) / 1000.0);
+            double current = ((double)(read_file(tmem, tf)!.trim().to_long() ?? 0) / 1000.0);
 
-            String sensor = proc::read_file(tmem, ty)!.trim().copy(allocator);
+            String sensor = read_file(tmem, ty)!.trim().copy(allocator);
 
             temps.push({ .sensor = sensor, .current = current, .critical = 0.0, });
         }

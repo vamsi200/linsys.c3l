@@ -1,5 +1,5 @@
+module sys;
 import std::io;
-import proc;
 import std::collections::list;
 
 struct SensorTemperature {
@@ -61,7 +61,7 @@ fn ulong? read_ulong_file(String path) @private {
     File file = file::open(path, "r")!;
     defer (void)file.close();
 
-    return proc::read_file(tmem, file)!.trim().to_ulong();
+    return read_file(tmem, file)!.trim().to_ulong();
 }
 
 fn SensorTemperature[]? sensor_temperatures(Allocator allocator) {
@@ -85,7 +85,7 @@ fn SensorTemperature[]? sensor_temperatures(Allocator allocator) {
             if (try File nf = file::open(name_path, "r")) {
                 defer (void)nf.close();
 
-                sensor_name = proc::read_file(tmem, nf)!.trim().copy(allocator);
+                sensor_name = read_file(tmem, nf)!.trim().copy(allocator);
             }
 
             for (int i = 1; i <= 32; i++) {
@@ -141,7 +141,7 @@ fn SensorFan[]? sensor_fans(Allocator allocator) {
             if (try File nf = file::open(name_path, "r")) {
                 defer (void)nf.close();
 
-                sensor_name = proc::read_file(tmem, nf)!.trim().copy(allocator);
+                sensor_name = read_file(tmem, nf)!.trim().copy(allocator);
             }
 
             for (int i = 1; i <= 32; i++) {
@@ -189,7 +189,7 @@ fn SensorBattery[]? sensor_battery(Allocator allocator) {
 
             defer (void)tf.close();
 
-            String type = proc::read_file(tmem, tf)!.trim();
+            String type = read_file(tmem, tf)!.trim();
 
             if (type != "Battery") {
                 continue;
@@ -202,7 +202,7 @@ fn SensorBattery[]? sensor_battery(Allocator allocator) {
             if (try File sf = file::open(status, "r")) {
                 defer (void)sf.close();
 
-                bat.status = battery_status(proc::read_file(tmem, sf)!.trim());
+                bat.status = battery_status(read_file(tmem, sf)!.trim());
             }
 
             String cap = string::tformat("%s/capacity", base);
@@ -210,7 +210,7 @@ fn SensorBattery[]? sensor_battery(Allocator allocator) {
             if (try File cf = file::open(cap, "r")) {
                 defer (void)cf.close();
 
-                bat.percent = proc::read_file(tmem, cf)!.trim().to_double() ?? 0;
+                bat.percent = read_file(tmem, cf)!.trim().to_double() ?? 0;
             }
 
             bat.energy_now = read_ulong_file(string::tformat("%s/energy_now", base)) ?? 0;

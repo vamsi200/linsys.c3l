@@ -1,5 +1,5 @@
+module sys;
 import std::io;
-import proc;
 import std::collections::list;
 
 struct NetIoCounters {
@@ -31,14 +31,12 @@ struct NetIfStats {
     ulong flags;
 }
 
-faultdef IO_ERROR;
-
 fn NetIoCounters[]? net_io_counters(Allocator allocator) {
     @pool() {
         File file = file::open("/proc/net/dev", "r")!;
         defer (void)file.close();
 
-        String content = proc::read_file(tmem, file)!;
+        String content = read_file(tmem, file)!;
 
         List{NetIoCounters} out;
         out.init(allocator);
@@ -110,7 +108,7 @@ fn void? read_system_connections(Allocator allocator, Protocol proto, List{Conne
 
         defer (void)file.close();
 
-        String content = proc::read_file(tmem, file)!;
+        String content = read_file(tmem, file)!;
 
         foreach (i, line : content.split(tmem, "\n")) {
             if (i == 0 || line.len == 0) {
@@ -133,11 +131,11 @@ fn void? read_system_connections(Allocator allocator, Protocol proto, List{Conne
 
             out.push(
                 {
-                    .local_addr = proc::ip_to_string(allocator, proc::parse_addr(local[0])),
-                    .remote_addr = proc::ip_to_string(allocator, proc::parse_addr(remote[0])),
+                    .local_addr = ip_to_string(allocator, parse_addr(local[0])),
+                    .remote_addr = ip_to_string(allocator, parse_addr(remote[0])),
                     .local_port = (ushort)(local[1].to_long(16) ?? 0),
                     .remote_port = (ushort)(remote[1].to_long(16) ?? 0),
-                    .state = proc::tcp_state(fields[3]),
+                    .state = tcp_state(fields[3]),
                     .protocol = proto,
                 }
             );
@@ -279,7 +277,7 @@ fn NetIfStats[]? net_if_stats(Allocator allocator) {
             if (try File f = file::open(oper, "r")) {
                 defer (void)f.close();
 
-                String state = proc::read_file(tmem, f)!.trim();
+                String state = read_file(tmem, f)!.trim();
 
                 st.is_up = state == "up";
             }
@@ -289,7 +287,7 @@ fn NetIfStats[]? net_if_stats(Allocator allocator) {
             if (try File f = file::open(mtu, "r")) {
                 defer (void)f.close();
 
-                st.mtu = proc::read_file(tmem, f)!.trim().to_int() ?? 0;
+                st.mtu = read_file(tmem, f)!.trim().to_int() ?? 0;
             }
 
             String speed = string::tformat("%s/speed", base);
@@ -297,7 +295,7 @@ fn NetIfStats[]? net_if_stats(Allocator allocator) {
             if (try File f = file::open(speed, "r")) {
                 defer (void)f.close();
 
-                st.speed = proc::read_file(tmem, f)!.trim().to_int() ?? 0;
+                st.speed = read_file(tmem, f)!.trim().to_int() ?? 0;
             }
 
             String flags = string::tformat("%s/flags", base);
@@ -305,7 +303,7 @@ fn NetIfStats[]? net_if_stats(Allocator allocator) {
             if (try File f = file::open(flags, "r")) {
                 defer (void)f.close();
 
-                st.flags = proc::read_file(tmem, f)!.trim().to_ulong(16) ?? 0;
+                st.flags = read_file(tmem, f)!.trim().to_ulong(16) ?? 0;
             }
 
             stats.push(st);

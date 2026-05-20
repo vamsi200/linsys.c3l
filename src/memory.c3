@@ -1,5 +1,5 @@
+module sys;
 import std::io;
-import proc;
 
 struct VirtualMemory {
     ulong total;
@@ -50,7 +50,7 @@ fn VirtualMemory? virtual_memory() {
         File file = file::open("/proc/meminfo", "r")!;
         defer (void)file.close();
 
-        String content = proc::read_file(tmem, file)!;
+        String content = read_file(tmem, file)!;
 
         VirtualMemory vm = { };
 
@@ -140,7 +140,7 @@ fn SwapMemory? swap_memory() {
         File meminfo = file::open("/proc/meminfo", "r")!;
         defer (void)meminfo.close();
 
-        String mem = proc::read_file(tmem, meminfo)!;
+        String mem = read_file(tmem, meminfo)!;
 
         foreach (line : mem.split(tmem, "\n")) {
             String[] split = line.split(tmem, ":");
@@ -173,7 +173,7 @@ fn SwapMemory? swap_memory() {
         File vmstat = file::open("/proc/vmstat", "r")!;
         defer (void)vmstat.close();
 
-        String vm = proc::read_file(tmem, vmstat)!;
+        String vm = read_file(tmem, vmstat)!;
 
         foreach (line : vm.split(tmem, "\n")) {
             String[] fields = line.split(tmem, " ");

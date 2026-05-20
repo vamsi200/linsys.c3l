@@ -1,10 +1,7 @@
+module sys;
 import std::io;
-import proc;
 import libc;
 import std::collections::list;
-
-
-faultdef IO_ERROR;
 
 struct DiskPartition {
     String device;
@@ -44,7 +41,7 @@ fn DiskPartition[]? disk_partitions(Allocator allocator) {
         File file = file::open("/proc/mounts", "r")!;
         defer (void)file.close();
 
-        String content = proc::read_file(tmem, file)!;
+        String content = read_file(tmem, file)!;
 
         List{DiskPartition} parts;
         parts.init(allocator);
@@ -74,7 +71,7 @@ fn DiskPartition[]? disk_partitions(Allocator allocator) {
     };
 }
 
-//NOTE: only works for linux 64 glibc
+// NOTE: only works for linux 64 glibc
 struct Statvfs {
     ulong f_bsize;
     ulong f_frsize;
@@ -93,10 +90,7 @@ struct Statvfs {
     int[5] __f_spare;
 }
 
-extern fn int statvfs(
-    ZString path,
-    Statvfs* buf
-);
+extern fn int statvfs(ZString path, Statvfs* buf);
 
 fn DiskUsage? disk_usage(String path) {
     Statvfs svfs = { };
@@ -126,7 +120,7 @@ fn DiskIoCounters[]? disk_io_counters(Allocator allocator) {
         File file = file::open("/proc/diskstats", "r")!;
         defer (void)file.close();
 
-        String content = proc::read_file(tmem, file)!;
+        String content = read_file(tmem, file)!;
 
         List{DiskIoCounters} disks;
         disks.init(allocator);
@@ -138,7 +132,7 @@ fn DiskIoCounters[]? disk_io_counters(Allocator allocator) {
 
             String[] fields = line.split(tmem, " ");
 
-            //NOTE: kernel dependent
+            // NOTE: kernel dependent
             if (fields.len < 14) {
                 continue;
             }
