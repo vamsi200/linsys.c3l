@@ -1,6 +1,7 @@
 module sys;
 import std::os;
 import std::io::file;
+import std::collections::list;
 
 faultdef
     NO_SUCH_PROCESS, PERMISSION_DENIED, PARSE_ERROR, NOT_SUPPORTED, PROCESS_EXITED, IO_ERROR, SCHED_NO_SUCH_PROCESS, SCHED_PERMISSION_DENIED, SCHED_INVALID, NICE_PERMISSION_DENIED, NICE_NO_SUCH_PROCESS, NICE_INVALID
@@ -45,4 +46,13 @@ fn String? read_file(Allocator allocator, File file) {
     }
 
     return builder.str_view();
+}
+
+fn String[] split_whitespace(Allocator allocator, String s) {
+    List{String} parts;
+    parts.init(allocator);
+    foreach (word : s.split(allocator, " ")) {
+        if (word.len > 0) parts.push(word);
+    }
+    return parts.to_array(allocator);
 }

@@ -131,8 +131,8 @@ fn ProcessInfo? get_info(Allocator allocator, int pid) {
         String[] lines = content.split(allocator, "\n");
 
         foreach (line : lines) {
-            long? idx = line.index_of_char(':');
-            if (catch err = idx) continue;
+            sz? idx = line.index_of_char(':');
+            if (catch idx) continue;
             if (idx == -1) continue;
 
             String key   = line[:idx].trim();
@@ -577,67 +577,47 @@ fn OpenFile[]? open_files(Allocator allocator, int pid) {
     };
 }
 
-
 // TODO: add v6 support
 fn void? read_connections(Allocator allocator, int pid, Protocol proto, List{Connection}* out) {
     @pool() {
         String filename;
-
         switch (proto) {
             case TCP: filename = "tcp";
             case UDP: filename = "udp";
         }
-
         String path = string::tformat("/proc/%d/net/%s", pid, filename);
 
-        if (!os::native_file_or_dir_exists(path)) {
-            return;
-        }
+        if (!os::native_file_or_dir_exists(path)) return;
 
         File file = file::open(path, "r")!;
         defer (void)file.close();
-
         String content = read_file(tmem, file)!;
-        String[] lines = content.split(tmem, "\n");
 
-        foreach (i, line : lines) {
-            if (i == 0 || line.len == 0) {
-                continue;
-            }
-
+        foreach (i, line : content.split(tmem, "\n")) {
+            if (i == 0 || line.len == 0) continue;
             String[] raw = line.trim().split(tmem, " ");
 
-            List{String} fields;
-            fields.init(tmem);
-
+            usz n = 0;
             foreach (f : raw) {
-                if (f.len > 0) {
-                    fields.push(f);
+                if (f.len > 0) raw[n++] = f;
+            }
+
+            if (n < 4) continue;
+            sz? colon_l = raw[1].index_of_char(':');
+            sz? colon_r = raw[2].index_of_char(':');
+            if (catch colon_l) continue;
+            if (catch colon_r) continue;
+
+            out.push(
+                {
+                    .local_addr = ip_to_string(allocator, parse_addr(raw[1][:colon_l])),
+                    .remote_addr = ip_to_string(allocator, parse_addr(raw[2][:colon_r])),
+                    .local_port = (ushort)(raw[1][colon_l + 1..].to_long(16) ?? 0),
+                    .remote_port = (ushort)(raw[2][colon_r + 1..].to_long(16) ?? 0),
+                    .state = tcp_state(raw[3]),
+                    .protocol = proto,
                 }
-            }
-
-            if (fields.len() < 4) {
-                continue;
-            }
-
-            String[] local = fields[1].split(tmem, ":");
-
-            String[] remote = fields[2].split(tmem, ":");
-
-            if (local.len < 2 || remote.len < 2) {
-                continue;
-            }
-
-            Connection entry = {
-                .local_addr = ip_to_string(allocator, parse_addr(local[0])),
-                .remote_addr = ip_to_string(allocator, parse_addr(remote[0])),
-                .local_port = (ushort)(local[1].to_long(16) ?? 0),
-                .remote_port = (ushort)(remote[1].to_long(16) ?? 0),
-                .state = tcp_state(fields[3]),
-                .protocol = proto,
-            };
-
-            out.push(entry);
+            );
         }
     };
 }
@@ -759,7 +739,7 @@ fn CpuTimes? cpu_times_parse(String path) @private {
 fn CpuTimes? cpu_times(int pid) {
     String p = string::tformat("/proc/%d/stat", pid);
     return cpu_times_parse(p)!;
-}
+
 
 fn CpuTimes? cpu_times_threads(int pid, int tid) {
     String p = string::tformat("/proc/%d/task/%d/stat", pid, tid);

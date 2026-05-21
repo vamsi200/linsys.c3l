@@ -6,28 +6,19 @@ struct VirtualMemory {
     ulong available;
     ulong used;
     ulong free;
-
     double percent;
-
     ulong active;
     ulong inactive;
-
     ulong buffers;
     ulong cached;
     ulong shared;
     ulong slab;
-
     ulong reclaimable;
-
     ulong swap_cached;
-
     ulong dirty;
     ulong writeback;
-
     ulong mapped;
-
     ulong page_tables;
-
     ulong committed;
     ulong commit_limit;
 }
@@ -37,13 +28,10 @@ struct SwapMemory {
     ulong total;
     ulong used;
     ulong free;
-
     double percent;
-
     ulong sin;
     ulong sout;
 }
-
 
 fn VirtualMemory? virtual_memory() {
     @pool() {
@@ -53,17 +41,14 @@ fn VirtualMemory? virtual_memory() {
         String content = read_file(tmem, file)!;
 
         VirtualMemory vm = { };
-
         foreach (line : content.split(tmem, "\n")) {
-            String[] split = line.split(tmem, ":");
+            sz? colon = line.index_of_char(':');
+            if (catch colon) continue;
 
-            if (split.len < 2) {
-                continue;
-            }
+            String key = line[:colon].trim();
 
-            String key = split[0].trim();
-
-            String value = split[1].trim().strip_suffix(" kB").trim();
+            String value = line[colon + 1..].trim().strip_suffix(" kB").trim();
+            if (key.len == 0 || key.len > 15) continue;
 
             ulong v = value.to_ulong() ?? 0;
 
@@ -132,7 +117,6 @@ fn VirtualMemory? virtual_memory() {
     };
 }
 
-
 fn SwapMemory? swap_memory() {
     @pool() {
         SwapMemory sm = { };
@@ -142,16 +126,14 @@ fn SwapMemory? swap_memory() {
 
         String mem = read_file(tmem, meminfo)!;
 
-        foreach (line : mem.split(tmem, "\n")) {
-            String[] split = line.split(tmem, ":");
+        // Should I keep it like this?
+        foreach (line : mem.split(tmem, "\n")[:18]) {
+            sz? index = line.index_of_char(':');
+            if (catch index) continue;
 
-            if (split.len < 2) {
-                continue;
-            }
+            String key = line[:index].trim();
 
-            String key = split[0].trim();
-
-            String value = split[1].trim().strip_suffix(" kB").trim();
+            String value = line[index + 1..].trim().strip_suffix(" kB").trim();
 
             ulong v = value.to_ulong() ?? 0;
 
@@ -162,6 +144,9 @@ fn SwapMemory? swap_memory() {
                 case "SwapFree":
                     sm.free = v;
             }
+
+            if (sm.total != 0 && sm.free != 0) break;
+
         }
 
         sm.used = sm.total - sm.free;
@@ -176,19 +161,20 @@ fn SwapMemory? swap_memory() {
         String vm = read_file(tmem, vmstat)!;
 
         foreach (line : vm.split(tmem, "\n")) {
-            String[] fields = line.split(tmem, " ");
+            sz? index = line.index_of_char(' ');
+            if (catch index) continue;
+            String key   = line[:index].trim();
+            String value = line[index + 1..].trim();
+            ulong v      = value.to_ulong() ?? 0;
 
-            if (fields.len < 2) {
-                continue;
-            }
-
-            switch (fields[0]) {
+            switch (key) {
                 case "pswpin":
-                    sm.sin = fields[1].to_ulong() ?? 0;
+                    sm.sin = v;
 
                 case "pswpout":
-                    sm.sout = fields[1].to_ulong() ?? 0;
+                    sm.sout = v;
             }
+            if (sm.sin != 0 && sm.sout != 0) break;
         }
 
         return sm;

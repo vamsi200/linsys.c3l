@@ -4,30 +4,22 @@ import std::collections::list;
 
 struct NetIoCounters {
     String name;
-
     ulong bytes_sent;
     ulong bytes_recv;
-
     ulong packets_sent;
     ulong packets_recv;
-
     ulong errin;
     ulong errout;
-
     ulong dropin;
     ulong dropout;
 }
 
 struct NetIfStats {
     String name;
-
     bool is_up;
-
     int mtu;
     int speed;
-
     bool duplex_full;
-
     ulong flags;
 }
 
@@ -46,15 +38,12 @@ fn NetIoCounters[]? net_io_counters(Allocator allocator) {
                 continue;
             }
 
-            String[] split = line.split(tmem, ":");
+            sz? idx = line.index_of_char(':');
+            if (catch idx) continue;
 
-            if (split.len < 2) {
-                continue;
-            }
+            String iface = line[:idx].trim();
 
-            String iface = split[0].trim();
-
-            String[] fields = split[1].trim().split(tmem, " ");
+            String[] fields = line[idx + 1..].trim().split(tmem, " ");
 
             if (fields.len < 16) {
                 continue;
@@ -91,50 +80,41 @@ fn Connection[]? net_connections(Allocator allocator) {
     return list.to_array(allocator);
 }
 
-
 fn void? read_system_connections(Allocator allocator, Protocol proto, List{Connection}* out) @private {
     @pool() {
         String filename;
-
         switch (proto) {
             case TCP:
                 filename = "/proc/net/tcp";
-
             case UDP:
                 filename = "/proc/net/udp";
         }
 
         File file = file::open(filename, "r")!;
-
         defer (void)file.close();
-
         String content = read_file(tmem, file)!;
 
         foreach (i, line : content.split(tmem, "\n")) {
-            if (i == 0 || line.len == 0) {
-                continue;
-            }
+            if (i == 0 || line.len == 0) continue;
+            String[] fields = split_whitespace(tmem, line.trim());
+            if (fields.len < 4) continue;
+            sz? colon_l = fields[1].index_of_char(':');
+            sz? colon_r = fields[2].index_of_char(':');
 
-            String[] fields = line.split(tmem, " ");
+            if (catch colon_l) continue;
+            if (catch colon_r) continue;
 
-            if (fields.len < 4) {
-                continue;
-            }
-
-            String[] local = fields[1].split(tmem, ":");
-
-            String[] remote = fields[2].split(tmem, ":");
-
-            if (local.len < 2 || remote.len < 2) {
-                continue;
-            }
+            String local_addr  = fields[1][:colon_l];
+            String local_port  = fields[1][colon_l + 1..];
+            String remote_addr = fields[2][:colon_r];
+            String remote_port = fields[2][colon_r + 1..];
 
             out.push(
                 {
-                    .local_addr = ip_to_string(allocator, parse_addr(local[0])),
-                    .remote_addr = ip_to_string(allocator, parse_addr(remote[0])),
-                    .local_port = (ushort)(local[1].to_long(16) ?? 0),
-                    .remote_port = (ushort)(remote[1].to_long(16) ?? 0),
+                    .local_addr = ip_to_string(allocator, parse_addr(local_addr)),
+                    .remote_addr = ip_to_string(allocator, parse_addr(remote_addr)),
+                    .local_port = (ushort)(local_port.to_long(16) ?? 0),
+                    .remote_port = (ushort)(remote_port.to_long(16) ?? 0),
                     .state = tcp_state(fields[3]),
                     .protocol = proto,
                 }
