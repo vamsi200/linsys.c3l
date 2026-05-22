@@ -43,7 +43,7 @@ fn NetIoCounters[]? net_io_counters(Allocator allocator) {
 
             String iface = line[:idx].trim();
 
-            String[] fields = line[idx + 1..].trim().split(tmem, " ");
+            String[] fields = split_whitespace(tmem, line[idx + 1..].trim());
 
             if (fields.len < 16) {
                 continue;
@@ -84,23 +84,22 @@ fn void? read_system_connections(Allocator allocator, Protocol proto, List{Conne
     @pool() {
         String filename;
         switch (proto) {
-            case TCP:
-                filename = "/proc/net/tcp";
-            case UDP:
-                filename = "/proc/net/udp";
+            case TCP: filename = "/proc/net/tcp";
+            case UDP: filename = "/proc/net/udp";
+            case TCP6: filename = "/proc/net/tcp6";
+            case UDP6: filename = "/proc/net/udp6";
         }
-
         File file = file::open(filename, "r")!;
         defer (void)file.close();
-        String content = read_file(tmem, file)!;
 
+        String content = read_file(tmem, file)!;
+        bool is_v6     = proto == Protocol.TCP6 || proto == Protocol.UDP6;
         foreach (i, line : content.split(tmem, "\n")) {
             if (i == 0 || line.len == 0) continue;
             String[] fields = split_whitespace(tmem, line.trim());
             if (fields.len < 4) continue;
             sz? colon_l = fields[1].index_of_char(':');
             sz? colon_r = fields[2].index_of_char(':');
-
             if (catch colon_l) continue;
             if (catch colon_r) continue;
 
@@ -111,8 +110,14 @@ fn void? read_system_connections(Allocator allocator, Protocol proto, List{Conne
 
             out.push(
                 {
-                    .local_addr = ip_to_string(allocator, parse_addr(local_addr)),
-                    .remote_addr = ip_to_string(allocator, parse_addr(remote_addr)),
+                    .local_addr = is_v6 ? ip_to_string_v6(
+                        allocator,
+                        parse_addr6(local_addr)
+                    ) : ip_to_string(allocator, parse_addr(local_addr)),
+                    .remote_addr = is_v6 ? ip_to_string_v6(
+                        allocator,
+                        parse_addr6(remote_addr)
+                    ) : ip_to_string(allocator, parse_addr(remote_addr)),
                     .local_port = (ushort)(local_port.to_long(16) ?? 0),
                     .remote_port = (ushort)(remote_port.to_long(16) ?? 0),
                     .state = tcp_state(fields[3]),

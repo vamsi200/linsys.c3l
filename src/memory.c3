@@ -23,7 +23,6 @@ struct VirtualMemory {
     ulong commit_limit;
 }
 
-
 struct SwapMemory {
     ulong total;
     ulong used;

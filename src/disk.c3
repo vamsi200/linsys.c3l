@@ -46,7 +46,8 @@ fn DiskPartition[]? disk_partitions(Allocator allocator) {
                 continue;
             }
 
-            String[] fields = line.split(tmem, " ");
+            String[] fields = split_whitespace(tmem, line);
+
             if (fields.len < 4) {
                 continue;
             }
@@ -109,7 +110,7 @@ HashMap{String, ulong} sector_size_cache;
 bool init_sec_size = false;
 
 // Not thread safe?
-fn ulong get_sector_size(Allocator allocator, String device) {
+fn ulong get_sector_size(Allocator allocator, String device) @private {
     if (!init_sec_size) {
         sector_size_cache.init(allocator);
         init_sec_size = true;
@@ -137,7 +138,7 @@ fn DiskIoCounters[]? disk_io_counters(Allocator allocator) {
 
         foreach (line : content.split(tmem, "\n")) {
             if (line.len == 0) continue;
-            String[] fields = line.trim().split(tmem, " ");
+            String[] fields = split_whitespace(tmem, line.trim());
             if (fields.len < DISKSTATS_MIN_FIELDS) continue;
             ulong sector_size = get_sector_size(allocator, fields[2]);
 
