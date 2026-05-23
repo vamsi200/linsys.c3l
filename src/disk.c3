@@ -84,6 +84,9 @@ struct Statvfs {
 
 extern fn int statvfs(ZString path, Statvfs* buf);
 
+<*
+@require path.len > 0 : "path must not be empty"
+*>
 fn DiskUsage? disk_usage(String path) {
     Statvfs svfs = { };
 
@@ -159,4 +162,35 @@ fn DiskIoCounters[]? disk_io_counters(Allocator allocator) {
         }
         return disks.to_array(allocator);
     };
+}
+
+<*
+ @require device.len > 0 : "device name must not be empty"
+*>
+fn DiskIoCounters? disk_io_counters_perdisk(Allocator allocator, String device) {
+    @pool() {
+        File file = file::open("/proc/diskstats", "r")!;
+        defer (void)file.close();
+        String content = read_file(tmem, file)!;
+        foreach (line : content.split(tmem, "\n")) {
+            if (line.len == 0) continue;
+            String[] fields = split_whitespace(tmem, line.trim());
+            if (fields.len < DISKSTATS_MIN_FIELDS) continue;
+            if (fields[2] != device) continue;
+            ulong sector_size = get_sector_size(allocator, fields[2]);
+            return (DiskIoCounters){
+                .name               = fields[2].copy(allocator),
+                .read_count         = fields[3].to_ulong() ?? 0,
+                .read_merged_count  = fields[4].to_ulong() ?? 0,
+                .read_bytes         = (fields[5].to_ulong() ?? 0) * sector_size,
+                .read_time          = fields[6].to_ulong() ?? 0,
+                .write_count        = fields[7].to_ulong() ?? 0,
+                .write_merged_count = fields[8].to_ulong() ?? 0,
+                .write_bytes        = (fields[9].to_ulong() ?? 0) * sector_size,
+                .write_time         = fields[10].to_ulong() ?? 0,
+                .busy_time          = fields[12].to_ulong() ?? 0,
+            };
+        }
+    };
+    return NOT_FOUND~;
 }

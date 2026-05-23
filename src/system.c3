@@ -77,27 +77,34 @@ fn SystemCpuTimes? sys_cpu_times() {
     File file = file::open("/proc/stat", "r")!;
     defer (void)file.close();
     String content = read_file(tmem, file)!;
+    sz? newline    = content.index_of_char('\n');
 
-    foreach (line : content.split(tmem, "\n")) {
-        if (!line.starts_with("cpu ")) continue;
-        String[] fields = line.split(tmem, " ");
-        if (fields.len < 11) return PARSE_ERROR~;
-
-        return {
-            .user = fields[1].to_double() ?? 0,
-            .nice = fields[2].to_double() ?? 0,
-            .system = fields[3].to_double() ?? 0,
-            .idle = fields[4].to_double() ?? 0,
-            .iowait = fields[5].to_double() ?? 0,
-            .irq = fields[6].to_double() ?? 0,
-            .softirq = fields[7].to_double() ?? 0,
-            .steal = fields[8].to_double() ?? 0,
-            .guest = fields[9].to_double() ?? 0,
-            .guest_nice = fields[10].to_double() ?? 0,
-        };
+    String line;
+    if (try sz nl = content.index_of_char('\n')) {
+        line = content[:nl];
+    } else {
+        line = content;
     }
 
-    return PARSE_ERROR~;
+    String[] raw = split_whitespace(tmem, line);
+    usz n        = 0;
+    foreach (f : raw) {
+        if (f.len > 0) raw[n++] = f;
+    }
+
+    if (n < 11) return PARSE_ERROR~;
+    return {
+        .user = raw[1].to_ulong() ?? 0,
+        .nice = raw[2].to_ulong() ?? 0,
+        .system = raw[3].to_ulong() ?? 0,
+        .idle = raw[4].to_ulong() ?? 0,
+        .iowait = raw[5].to_ulong() ?? 0,
+        .irq = raw[6].to_ulong() ?? 0,
+        .softirq = raw[7].to_ulong() ?? 0,
+        .steal = raw[8].to_ulong() ?? 0,
+        .guest = raw[9].to_ulong() ?? 0,
+        .guest_nice = raw[10].to_ulong() ?? 0,
+    };
 }
 
 fn SystemCpuTimes[]? cpu_times_percpu(Allocator allocator) {
@@ -187,7 +194,7 @@ fn CpuSnapshot[]? cpu_snapshot_percpu(Allocator allocator) {
 
         if (line.starts_with("cpu ")) continue;
 
-        String[] fields = line.split(tmem, " ");
+        String[] fields = split_whitespace(tmem, line);
         if (fields.len < 5) return PARSE_ERROR~;
 
         foreach (field : fields[1..]) {
@@ -213,6 +220,9 @@ fn double sys_cpu_percent(CpuSnapshot old, CpuSnapshot new) {
     return ((double)(total_delta - idle_delta) / (double)total_delta) * 100.0;
 }
 
+<*
+ @require new.len == old.len : "snapshot arrays must be same length"
+*>
 fn double[]? sys_cpu_percent_percpu(Allocator allocator, CpuSnapshot[] old, CpuSnapshot[] new) {
     if (old.len != new.len) {
         return PARSE_ERROR~;
@@ -376,7 +386,8 @@ fn CpuStats? cpu_stats() {
         CpuStats stats = { };
 
         foreach (line : content.split(tmem, "\n")) {
-            String[] fields = line.split(tmem, " ");
+            String[] fields = split_whitespace(tmem, line);
+
 
             if (fields.len < 2) {
                 continue;
@@ -409,8 +420,7 @@ fn LoadAvg? loadavg() {
 
         String content = read_file(tmem, file)!;
 
-        String[] fields = content.split(tmem, " ");
-
+        String[] fields = split_whitespace(tmem, content);
 
         if (fields.len < 3) {
             return PARSE_ERROR~;
@@ -551,4 +561,40 @@ fn CpuUsage cpu_usage(SystemCpuTimes old, SystemCpuTimes new) {
         .idle_percent = ((new.idle - old.idle) / total_delta) * 100.0,
         .iowait_percent = ((new.iowait - old.iowait) / total_delta) * 100.0,
     };
+}
+
+fn double? uptime() {
+    File file = file::open("/proc/uptime", "r")!;
+    defer (void)file.close();
+    String content  = read_file(tmem, file)!;
+    String[] fields = split_whitespace(tmem, content.trim());
+    if (fields.len < 1) return NOT_FOUND~;
+    return fields[0].to_double();
+}
+
+fn String? hostname() {
+    File file = file::open("/proc/sys/kernel/hostname", "r")!;
+    defer (void)file.close();
+    return read_file(tmem, file)!.trim().copy(tmem);
+}
+
+fn String? kernel_version() {
+    File file = file::open("/proc/sys/kernel/osrelease", "r")!;
+    defer (void)file.close();
+    return read_file(tmem, file)!.trim().copy(tmem);
+}
+
+fn String? os_release(Allocator allocator) {
+    File file = file::open("/etc/os-release", "r")!;
+    defer (void)file.close();
+    String content = read_file(tmem, file)!;
+    foreach (line : content.split(tmem, "\n")) {
+        if (!line.starts_with("PRETTY_NAME=")) continue;
+        String val = line.strip_prefix("PRETTY_NAME=").trim();
+        if (val.len >= 2 && val[0] == '"' && val[val.len - 1] == '"') {
+            val = val[1:val.len - 2];
+        }
+        return val.copy(allocator);
+    }
+    return NOT_FOUND~;
 }
