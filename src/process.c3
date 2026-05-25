@@ -120,8 +120,13 @@ struct RLimitEntry {
     RLimit limit;
 }
 
+struct CpuSnapshot {
+    double proc_time;
+    ulong total_time;
+}
+
 <*
-@require pid > 0 : "pid must be positive"
+ @require pid > 0 : "pid must be positive"
 *>
 fn ProcessInfo? get_info(Allocator allocator, int pid) {
     ProcessInfo proc = { };
@@ -214,7 +219,7 @@ fn ProcState proc_state(char c) @private {
 }
 
 <*
-@require pid > 0 : "pid must be positive"
+ @require pid > 0 : "pid must be positive"
 *>
 fn Process? get_proc(Allocator allocator, int pid) {
     Process p;
@@ -258,7 +263,7 @@ fn Process? get_proc(Allocator allocator, int pid) {
 }
 
 <*
-@require pid > 0 : "pid must be positive"
+ @require pid > 0 : "pid must be positive"
 *>
 fn String? read_cmdline(Allocator allocator, int pid) {
     String path = string::tformat("/proc/%d/cmdline", pid);
@@ -277,7 +282,7 @@ fn String? read_cmdline(Allocator allocator, int pid) {
 }
 
 <*
-@require pid > 0 : "pid must be positive"
+ @require pid > 0 : "pid must be positive"
 *>
 fn String? read_exe(Allocator allocator, int pid) {
     String path = string::tformat("/proc/%d/exe", pid);
@@ -328,7 +333,7 @@ fn int[]? list_pids(Allocator allocator) {
 }
 
 <*
-@require pid > 0 : "pid must be positive"
+ @require pid > 0 : "pid must be positive"
 *>
 fn bool exists(int pid) {
     String path = string::tformat("/proc/%d", pid);
@@ -336,7 +341,7 @@ fn bool exists(int pid) {
 }
 
 <*
-@require pid > 0 : "pid must be positive"
+ @require pid > 0 : "pid must be positive"
 *>
 fn String? cwd(Allocator allocator, int pid) {
     char[4096] buf;
@@ -363,7 +368,7 @@ fn String? cwd(Allocator allocator, int pid) {
 }
 
 <*
-@require pid > 0 : "pid must be positive"
+ @require pid > 0 : "pid must be positive"
 *>
 fn EnvVar[]? environ(Allocator allocator, int pid) {
     String path = string::tformat("/proc/%d/environ", pid);
@@ -414,7 +419,7 @@ fn String? environ_get(Allocator allocator, int pid, String key) {
 }
 
 <*
-@require pid > 0 : "pid must be positive"
+ @require pid > 0 : "pid must be positive"
 *>
 fn String[]? fd_paths(Allocator allocator, int pid) {
     String[] fds;
@@ -446,7 +451,7 @@ fn String[]? fd_paths(Allocator allocator, int pid) {
 }
 
 <*
-@require pid > 0 : "pid must be positive"
+ @require pid > 0 : "pid must be positive"
 *>
 fn int[]? fds(Allocator allocator, int pid) {
     @pool() {
@@ -470,7 +475,7 @@ fn int[]? fds(Allocator allocator, int pid) {
 }
 
 <*
-@require pid > 0 : "pid must be positive"
+ @require pid > 0 : "pid must be positive"
 *>
 fn MemoryMap[]? maps(Allocator allocator, int pid) {
     @pool() {
@@ -560,7 +565,7 @@ fn String flags_to_mode(int flags, Allocator allocator) @private {
 }
 
 <*
-@require pid > 0 : "pid must be positive"
+ @require pid > 0 : "pid must be positive"
 *>
 fn OpenFile[]? open_files(Allocator allocator, int pid) {
     @pool() {
@@ -631,9 +636,6 @@ fn OpenFile[]? open_files(Allocator allocator, int pid) {
     };
 }
 
-<*
-@require pid > 0 : "pid must be positive"
-*>
 fn void? read_connections(Allocator allocator, int pid, Protocol proto, List{Connection}* out) @private {
     @pool() {
         String filename;
@@ -690,7 +692,7 @@ fn void? read_connections(Allocator allocator, int pid, Protocol proto, List{Con
 }
 
 <*
-@require pid > 0 : "pid must be positive"
+ @require pid > 0 : "pid must be positive"
 *>
 fn Connection[]? connections(Allocator allocator, int pid) {
     List{Connection} list;
@@ -759,7 +761,7 @@ fn ulong? read_clktck() @private {
 }
 
 <*
-@require pid > 0 : "pid must be positive"
+ @require pid > 0 : "pid must be positive"
 *>
 fn double? create_time(int pid) {
     String p  = string::tformat("/proc/%d/stat", pid);
@@ -809,21 +811,16 @@ fn CpuTimes? cpu_times_parse(String path) @private {
 
     if (fields.len > 14) {
         double clk = clktck();
-        if (try double utime = fields[11]
-            .to_double() && try double stime = fields[12]
-                .to_double() && try double cutime = fields[13]
-                    .to_double() && try double cstime = fields[14].to_double()) {
-            cpu.user = utime / clk;
-            cpu.system = stime / clk;
-            cpu.children_user = cutime / clk;
-            cpu.children_system = cstime / clk;
-        }
+        if (try double utime = fields[11].to_double()) cpu.user = utime / clk;
+        if (try double stime = fields[12].to_double()) cpu.system = stime / clk;
+        if (try double cutime = fields[13].to_double()) cpu.children_user = cutime / clk;
+        if (try double cstime = fields[14].to_double()) cpu.children_system = cstime / clk;
     }
     return cpu;
 }
 
 <*
-@require pid > 0 : "pid must be positive"
+ @require pid > 0 : "pid must be positive"
 *>
 fn CpuTimes? cpu_times(int pid) {
     String p = string::tformat("/proc/%d/stat", pid);
@@ -831,8 +828,8 @@ fn CpuTimes? cpu_times(int pid) {
 }
 
 <*
-@require pid > 0 : "pid must be positive"
-@require tid > 0 : "tid must be positive"
+ @require pid > 0 : "pid must be positive"
+ @require tid > 0 : "tid must be positive"
 *>
 fn CpuTimes? cpu_times_threads(int pid, int tid) {
     String p = string::tformat("/proc/%d/task/%d/stat", pid, tid);
@@ -840,28 +837,34 @@ fn CpuTimes? cpu_times_threads(int pid, int tid) {
 }
 
 <*
-@require pid > 0 : "pid must be positive"
-@require interval >= 0.0 : "interval must be non-negative"
+ @require pid > 0 : "pid must be positive"
+*>
+fn CpuSnapshot? cpu_snapshot(int pid) {
+    CpuTimes times = cpu_times(pid)!;
+    ulong total    = read_total_cpu_time()!;
+    return { times.user + times.system, total };
+}
+
+<*
+ @require pid > 0 : "pid must be positive"
+*>
+fn double? cpu_percent_from(CpuSnapshot first, int pid) {
+    CpuTimes times     = cpu_times(pid)!;
+    ulong total2       = read_total_cpu_time()!;
+    double delta       = (times.user + times.system) - first.proc_time;
+    double total_delta = (double)(total2 - first.total_time);
+    if (total_delta <= 0) return 0.0;
+    return (delta / total_delta) * 100.0;
+}
+
+<*
+ @require pid > 0 : "pid must be positive"
+ @require interval >= 0.0 : "interval must be non-negative"
 *>
 fn double? cpu_percent(int pid, double interval) {
-    CpuTimes first = cpu_times(pid)!;
-    double proc1   = first.user + first.system;
-
-    ulong total1 = read_total_cpu_time()!;
-
+    CpuSnapshot snap = cpu_snapshot(pid)!;
     thread::sleep_ms((long)(interval * 1000));
-
-    CpuTimes second = cpu_times(pid)!;
-    double proc2    = second.user + second.system;
-
-    ulong total2 = read_total_cpu_time()!;
-
-    double delta       = proc2 - proc1;
-    double total_delta = (double)(total2 - total1);
-
-    if (total_delta <= 0) return 0.0;
-
-    return (delta / total_delta) * 100.0;
+    return cpu_percent_from(snap, pid);
 }
 
 fn ulong? read_total_cpu_time() {
@@ -904,7 +907,7 @@ fn ulong? parse_proc_ulong(String path, String key) @private {
 }
 
 <*
-@require pid > 0 : "pid must be positive"
+ @require pid > 0 : "pid must be positive"
 *>
 fn double? memory_percent(int pid) {
     @pool() {
@@ -917,7 +920,7 @@ fn double? memory_percent(int pid) {
 }
 
 <*
-@require pid > 0 : "pid must be positive"
+ @require pid > 0 : "pid must be positive"
 *>
 fn IoCounters? io_counters(int pid) {
     IoCounters ioc = { };
@@ -932,13 +935,12 @@ fn IoCounters? io_counters(int pid) {
             String[] split = line.split(tmem, ":");
             if (split.len < 2) continue;
             String key = split[0].trim();
-            if (try v = split[1].trim().to_ulong()) {
-                switch (key) {
-                    case "rchar": ioc.read_count = v;
-                    case "wchar": ioc.write_count = v;
-                    case "read_bytes": ioc.read_bytes = v;
-                    case "write_bytes": ioc.write_bytes = v;
-                }
+            ulong v    = split[1].trim().to_ulong() ?? 0;
+            switch (key) {
+                case "rchar": ioc.read_count = v;
+                case "wchar": ioc.write_count = v;
+                case "read_bytes": ioc.read_bytes = v;
+                case "write_bytes": ioc.write_bytes = v;
             }
         }
     };
@@ -960,15 +962,15 @@ constdef Signal : int {
 fn void? send_signal(int pid, Signal signal) {
     if (posix::kill(pid, (CInt)signal) == 0) return;
     switch (libc::errno()) {
-        case EPERM:  return PERMISSION_DENIED~;
-        case ESRCH:  return NO_SUCH_PROCESS~;
-        default:            return UNKNOWN~;
+        case EPERM: return PERMISSION_DENIED~;
+        case ESRCH: return NO_SUCH_PROCESS~;
+        default: return UNKNOWN~;
     }
 }
 
-fn void? suspend(int pid)   => send_signal(pid, Signal.STOP);
-fn void? resume(int pid)    => send_signal(pid, Signal.CONT);
-fn void? kill(int pid)      => send_signal(pid, Signal.KILL);
+fn void? suspend(int pid) => send_signal(pid, Signal.STOP);
+fn void? resume(int pid) => send_signal(pid, Signal.CONT);
+fn void? kill(int pid) => send_signal(pid, Signal.KILL);
 fn void? terminate(int pid) => send_signal(pid, Signal.TERM);
 fn void? interrupt(int pid) => send_signal(pid, Signal.INT);
 
@@ -978,7 +980,7 @@ struct PidEntry {
 }
 
 <*
-@require pid > 0 : "pid must be positive"
+ @require pid > 0 : "pid must be positive"
 *>
 fn int[]? children(Allocator allocator, int pid, bool recursive) {
     int[] pid_list = list_pids(tmem)!;
@@ -1024,7 +1026,7 @@ fn int[]? children(Allocator allocator, int pid, bool recursive) {
 }
 
 <*
-@require pid > 0 : "pid must be positive"
+ @require pid > 0 : "pid must be positive"
 *>
 fn int? parent(int pid) {
     @pool() {
@@ -1041,7 +1043,7 @@ fn int? parent(int pid) {
 }
 
 <*
-@require pid > 0 : "pid must be positive"
+ @require pid > 0 : "pid must be positive"
 *>
 fn int? nice_get(int pid) {
     CInt p = libc::getpriority(libc::PRIO_PROCESS, pid);
@@ -1056,8 +1058,8 @@ fn int? nice_get(int pid) {
 }
 
 <*
-@require pid > 0 : "pid must be positive"
-@require value >= -20 && value <= 19 : "nice value must be in range -20..19"
+ @require pid > 0 : "pid must be positive"
+ @require value >= -20 && value <= 19 : "nice value must be in range -20..19"
 *>
 fn void? nice_set(int pid, int value) {
     value = value < -20 ? -20 : (value > 19 ? 19 : value);
@@ -1078,7 +1080,7 @@ extern fn CInt sched_setaffinity(CInt pid, usz cpusetsize, CpuSet* mask);
 extern fn CInt sched_getaffinity(CInt pid, usz cpusetsize, CpuSet* mask);
 
 <*
-@require pid > 0 : "pid must be positive"
+ @require pid > 0 : "pid must be positive"
 *>
 fn int[]? cpu_affinity_get(Allocator allocator, int pid) {
     CpuSet cpu_set = { };
@@ -1103,8 +1105,8 @@ fn int[]? cpu_affinity_get(Allocator allocator, int pid) {
 }
 
 <*
-@require pid > 0 : "pid must be positive"
-@require cpus.len > 0 : "cpu affinity must have at least one cpu"
+ @require pid > 0 : "pid must be positive"
+ @require cpus.len > 0 : "cpu affinity must have at least one cpu"
 *>
 fn void? cpu_affinity_set(int pid, int[] cpus) {
     CpuSet cpu_set = { };
@@ -1124,7 +1126,7 @@ fn void? cpu_affinity_set(int pid, int[] cpus) {
 }
 
 <*
-@require pid > 0 : "pid must be positive"
+ @require pid > 0 : "pid must be positive"
 *>
 fn RLimitEntry[]? rlimits_get(Allocator allocator, int pid) {
     @pool() {
@@ -1157,7 +1159,7 @@ fn RLimitEntry[]? rlimits_get(Allocator allocator, int pid) {
 }
 
 <*
-@require pid > 0 : "pid must be positive"
+ @require pid > 0 : "pid must be positive"
 *>
 fn ThreadInfo[]? threads(Allocator allocator, int pid) {
     @pool() {

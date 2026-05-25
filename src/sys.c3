@@ -34,9 +34,18 @@ fn String ip_to_string_v6(Allocator allocator, uint128 ip) {
     for (int i = 0; i < 8; i++) {
         groups[i] = (ushort)((ip >> (i * 16)) & 0xFFFF);
     }
-    return string::format(allocator, "%x:%x:%x:%x:%x:%x:%x:%x",
-        groups[7], groups[6], groups[5], groups[4],
-        groups[3], groups[2], groups[1], groups[0]);
+    return string::format(
+        allocator,
+        "%x:%x:%x:%x:%x:%x:%x:%x",
+        groups[7],
+        groups[6],
+        groups[5],
+        groups[4],
+        groups[3],
+        groups[2],
+        groups[1],
+        groups[0]
+    );
 }
 
 fn uint parse_addr(String hex) {
@@ -48,7 +57,7 @@ fn uint128 parse_addr6(String hex) {
     if (hex.len != 32) return (uint128)0;
     uint128 result = 0;
     for (int i = 0; i < 4; i++) {
-        uint word = (uint)(hex[i*8:8].to_long(16) ?? 0);
+        uint word = (uint)(hex[i * 8:8].to_long(16) ?? 0);
         result |= (uint128)word << (i * 32);
     }
     return result;

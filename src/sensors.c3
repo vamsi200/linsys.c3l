@@ -80,15 +80,16 @@ fn SensorTemperature[]? sensor_temperatures(Allocator allocator) {
             for (int i = 1; i <= 32; i++) {
                 String input = string::tformat("%s/temp%d_input", base, i);
                 ulong? raw   = read_ulong_file(input);
-                if (catch raw) break;
+                if (catch raw) continue;
 
                 double current  = (double)raw / 1000.0;
                 double critical = 0.0;
                 String crit     = string::tformat("%s/temp%d_crit", base, i);
 
-                if (try ulong crit_raw = read_ulong_file(crit)) {
-                    critical = (double)crit_raw / 1000.0;
-                }
+                ulong? crit_raw = read_ulong_file(crit);
+                if (catch crit_raw) continue;
+
+                critical = (double)crit_raw / 1000.0;
 
                 temps.push(
                     {
@@ -126,7 +127,7 @@ fn SensorFan[]? sensor_fans(Allocator allocator) {
             for (int i = 1; i <= 32; i++) {
                 String input = string::tformat("%s/fan%d_input", base, i);
                 ulong? raw   = read_ulong_file(input);
-                if (catch raw) break;
+                if (catch raw) continue;
 
                 fans.push({ .name = string::format(allocator, "%s-fan%d", sensor_name, i), .current = (int)raw, });
             }

@@ -125,8 +125,7 @@ fn SwapMemory? swap_memory() {
 
         String mem = read_file(tmem, meminfo)!;
 
-        // Should I keep it like this?
-        foreach (line : mem.split(tmem, "\n")[:18]) {
+        foreach (line : mem.split(tmem, "\n")) {
             sz? index = line.index_of_char(':');
             if (catch index) continue;
 

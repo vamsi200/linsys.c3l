@@ -21,7 +21,7 @@ struct SystemCpuTimes {
     double guest_nice;
 }
 
-struct CpuSnapshot {
+struct SystemCpuSnapshot {
     ulong total;
     ulong idle;
 }
@@ -146,7 +146,7 @@ fn SystemCpuTimes[]? cpu_times_percpu(Allocator allocator) {
     return cpus.to_array(allocator);
 }
 
-fn CpuSnapshot? cpu_snapshot() {
+fn SystemCpuSnapshot? sys_cpu_snapshot() {
     File file = file::open("/proc/stat", "r")!;
     defer (void)file.close();
     String content = read_file(tmem, file)!;
@@ -180,11 +180,11 @@ fn CpuSnapshot? cpu_snapshot() {
     return PARSE_ERROR~;
 }
 
-fn CpuSnapshot[]? cpu_snapshot_percpu(Allocator allocator) {
+fn SystemCpuSnapshot[]? cpu_snapshot_percpu(Allocator allocator) {
     File file = file::open("/proc/stat", "r")!;
     defer (void)file.close();
     String content = read_file(tmem, file)!;
-    List{CpuSnapshot} cs;
+    List{SystemCpuSnapshot} cs;
     cs.init(allocator);
 
     ulong total = 0;
@@ -209,7 +209,7 @@ fn CpuSnapshot[]? cpu_snapshot_percpu(Allocator allocator) {
     return cs.to_array(allocator);
 }
 
-fn double sys_cpu_percent(CpuSnapshot old, CpuSnapshot new) {
+fn double sys_cpu_percent(SystemCpuSnapshot old, SystemCpuSnapshot new) {
     ulong total_delta = new.total - old.total;
     ulong idle_delta  = new.idle - old.idle;
 
@@ -223,7 +223,7 @@ fn double sys_cpu_percent(CpuSnapshot old, CpuSnapshot new) {
 <*
  @require new.len == old.len : "snapshot arrays must be same length"
 *>
-fn double[]? sys_cpu_percent_percpu(Allocator allocator, CpuSnapshot[] old, CpuSnapshot[] new) {
+fn double[]? sys_cpu_percent_percpu(Allocator allocator, SystemCpuSnapshot[] old, SystemCpuSnapshot[] new) {
     if (old.len != new.len) {
         return PARSE_ERROR~;
     }
@@ -231,7 +231,7 @@ fn double[]? sys_cpu_percent_percpu(Allocator allocator, CpuSnapshot[] old, CpuS
     double[] out = mem::alloc::alloc_array(allocator, double, old.len);
 
     foreach (i, o : old) {
-        CpuSnapshot n = new[i];
+        SystemCpuSnapshot n = new[i];
 
         ulong total_delta = n.total - o.total;
         ulong idle_delta  = n.idle - o.idle;
@@ -334,9 +334,7 @@ fn CpuFreq[]? cpu_freq_percpu(Allocator allocator) {
         foreach (entry : list) {
             String name = entry.file_tbasename()!;
 
-            if (!name.starts_with("cpu") || name == "cpufreq") {
-                continue;
-            }
+            if (!name.starts_with("cpu") || name == "cpufreq") continue;
 
             if (try name[3..].to_int()) {
                 String base = string::tformat("/sys/devices/system/cpu/%s/cpufreq", name);
@@ -348,27 +346,24 @@ fn CpuFreq[]? cpu_freq_percpu(Allocator allocator) {
                 String max_path = string::tformat("%s/scaling_max_freq", base);
 
                 File? cur = file::open(cur_path, "r");
-                if (catch cur) {
-                    continue;
-                }
+                if (catch cur) continue;
                 defer (void)cur.close();
 
                 File? min = file::open(min_path, "r");
-                if (catch min) {
-                    continue;
-                }
+                if (catch min) continue;
+
                 defer (void)min.close();
 
                 File? max = file::open(max_path, "r");
-                if (catch max) {
-                    continue;
-                }
+                if (catch max) continue;
                 defer (void)max.close();
+                String cur_content = read_file(tmem, cur) ?? "";
+                String min_content = read_file(tmem, min) ?? "";
+                String max_content = read_file(tmem, max) ?? "";
 
-                freqs.push({ .current = ((double)(read_file(tmem, cur)!.trim()
-                    .to_ulong() ?? 0) / 1000.0), .min = ((double)(read_file(tmem, min)!.trim()
-                        .to_ulong() ?? 0) / 1000.0), .max = ((double)(read_file(tmem, max)!.trim()
-                            .to_ulong() ?? 0) / 1000.0), });
+                freqs.push({ .current = (cur_content.trim()
+                    .to_ulong() ?? 0) / 1000.0, .min = (min_content.trim()
+                        .to_ulong() ?? 0) / 1000.0, .max = (max_content.trim().to_ulong() ?? 0) / 1000.0, });
             }
         }
 
@@ -489,9 +484,7 @@ fn CpuInfo[]? cpu_info(Allocator allocator) {
             }
         }
 
-        if (current.model.len > 0 || current.vendor.len > 0) {
-            infos.push(current);
-        }
+        if (current.model.len > 0 || current.vendor.len > 0) infos.push(current);
 
         return infos.to_array(allocator);
     };
@@ -510,9 +503,7 @@ fn CpuTemp[]? cpu_temps(Allocator allocator) {
         foreach (entry : list) {
             String name = entry.file_tbasename()!;
 
-            if (!name.starts_with("thermal_zone")) {
-                continue;
-            }
+            if (!name.starts_with("thermal_zone")) continue;
 
             String base = string::tformat("/sys/class/thermal/%s", name);
 
@@ -521,15 +512,11 @@ fn CpuTemp[]? cpu_temps(Allocator allocator) {
             String type_path = string::tformat("%s/type", base);
 
             File? tf = file::open(temp_path, "r");
-            if (catch tf) {
-                continue;
-            }
+            if (catch tf) continue;
             defer (void)tf.close();
 
             File? ty = file::open(type_path, "r");
-            if (catch ty) {
-                continue;
-            }
+            if (catch ty) continue;          
             defer (void)ty.close();
 
             double current = ((double)(read_file(tmem, tf)!.trim().to_long() ?? 0) / 1000.0);
