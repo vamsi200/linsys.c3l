@@ -32,6 +32,30 @@ struct DiskIoCounters {
     ulong busy_time;
 }
 
+struct Statvfs {
+    ulong f_bsize;
+    ulong f_frsize;
+    ulong f_blocks;
+    ulong f_bfree;
+    ulong f_bavail;
+    ulong f_files;
+    ulong f_ffree;
+    ulong f_favail;
+    ulong f_fsid;
+    ulong f_flag;
+    ulong f_namemax;
+
+    char[128] __f_spare; // enough headroom I guess
+}
+
+extern fn int statvfs(ZString path, Statvfs* buf);
+
+struct DiskContext {
+    HashMap{String, ulong} sector_size_cache;
+    Mutex cache_mutex;
+    Allocator allocator;
+}
+
 fn DiskPartition[]? disk_partitions(Allocator allocator) {
     @pool() {
         File file = file::open("/proc/mounts", "r")!;
@@ -67,24 +91,6 @@ fn DiskPartition[]? disk_partitions(Allocator allocator) {
     };
 }
 
-struct Statvfs {
-    ulong f_bsize;
-    ulong f_frsize;
-    ulong f_blocks;
-    ulong f_bfree;
-    ulong f_bavail;
-    ulong f_files;
-    ulong f_ffree;
-    ulong f_favail;
-    ulong f_fsid;
-    ulong f_flag;
-    ulong f_namemax;
-
-    char[128] __f_spare; // enough headroom I guess
-}
-
-extern fn int statvfs(ZString path, Statvfs* buf);
-
 <*
  @require path.len > 0 : "path must not be empty"
 *>
@@ -108,12 +114,6 @@ fn DiskUsage? disk_usage(String path) {
     }
 
     return { .total = total, .used = used, .free = free, .percent = percent, };
-}
-
-struct DiskContext {
-    HashMap{String, ulong} sector_size_cache;
-    Mutex cache_mutex;
-    Allocator allocator;
 }
 
 fn void DiskContext.init(&self, Allocator allocator) {
@@ -152,33 +152,35 @@ fn ulong DiskContext.get_sector_size(&self, String device) {
 
 const int DISKSTATS_MIN_FIELDS = 14; // kernel 2.6+
 
+fn DiskIoCounters? parse_disk_line(Allocator allocator, String[] fields, DiskContext* ctx) @private {
+    if (fields.len < DISKSTATS_MIN_FIELDS) return NOT_FOUND~;
+    ulong sector_size = ctx.get_sector_size(fields[2]);
+    return {
+        .name = fields[2].copy(allocator),
+        .read_count = fields[3].to_ulong() ?? 0,
+        .read_merged_count = fields[4].to_ulong() ?? 0,
+        .read_bytes = (fields[5].to_ulong() ?? 0) * sector_size,
+        .read_time = fields[6].to_ulong() ?? 0,
+        .write_count = fields[7].to_ulong() ?? 0,
+        .write_merged_count = fields[8].to_ulong() ?? 0,
+        .write_bytes = (fields[9].to_ulong() ?? 0) * sector_size,
+        .write_time = fields[10].to_ulong() ?? 0,
+        .busy_time = fields[12].to_ulong() ?? 0,
+    };
+}
+
 fn DiskIoCounters[]? disk_io_counters(Allocator allocator, DiskContext* ctx) {
     @pool() {
         File file = file::open("/proc/diskstats", "r")!;
         defer (void)file.close();
-        String content = read_file(tmem, file)!;
         List{DiskIoCounters} disks;
         disks.init(allocator);
-
-        foreach (line : content.split(tmem, "\n")) {
+        while (try line = io::treadline(&file)) {
             if (line.len == 0) continue;
             String[] fields = split_whitespace(tmem, line.trim());
-            if (fields.len < DISKSTATS_MIN_FIELDS) continue;
-            ulong sector_size = ctx.get_sector_size(fields[2]);
-            disks.push(
-                {
-                    .name = fields[2].copy(allocator),
-                    .read_count = fields[3].to_ulong() ?? 0,
-                    .read_merged_count = fields[4].to_ulong() ?? 0,
-                    .read_bytes = (fields[5].to_ulong() ?? 0) * sector_size,
-                    .read_time = fields[6].to_ulong() ?? 0,
-                    .write_count = fields[7].to_ulong() ?? 0,
-                    .write_merged_count = fields[8].to_ulong() ?? 0,
-                    .write_bytes = (fields[9].to_ulong() ?? 0) * sector_size,
-                    .write_time = fields[10].to_ulong() ?? 0,
-                    .busy_time = fields[12].to_ulong() ?? 0,
-                }
-            );
+            if (try disk = parse_disk_line(allocator, fields, ctx)) {
+                disks.push(disk);
+            }
         }
         return disks.to_array(allocator);
     };
@@ -191,25 +193,62 @@ fn DiskIoCounters? disk_io_counters_perdisk(Allocator allocator, String device, 
     @pool() {
         File file = file::open("/proc/diskstats", "r")!;
         defer (void)file.close();
-        String content = read_file(tmem, file)!;
-        foreach (line : content.split(tmem, "\n")) {
+        while (try line = io::treadline(&file)) {
             if (line.len == 0) continue;
             String[] fields = split_whitespace(tmem, line.trim());
             if (fields.len < DISKSTATS_MIN_FIELDS) continue;
             if (fields[2] != device) continue;
-            ulong sector_size = ctx.get_sector_size(fields[2]);
-            return (DiskIoCounters) {
-                .name = fields[2].copy(allocator),
-                .read_count = fields[3].to_ulong() ?? 0,
-                .read_merged_count = fields[4].to_ulong() ?? 0,
-                .read_bytes = (fields[5].to_ulong() ?? 0) * sector_size,
-                .read_time = fields[6].to_ulong() ?? 0,
-                .write_count = fields[7].to_ulong() ?? 0,
-                .write_merged_count = fields[8].to_ulong() ?? 0,
-                .write_bytes = (fields[9].to_ulong() ?? 0) * sector_size,
-                .write_time = fields[10].to_ulong() ?? 0,
-                .busy_time = fields[12].to_ulong() ?? 0,
-            };
+            return parse_disk_line(allocator, fields, ctx);
+        }
+    };
+    return NOT_FOUND~;
+}
+
+struct DiskIoPoller {
+    File file;
+    DiskContext* ctx;
+    List{DiskIoCounters} list;
+    Allocator allocator;
+}
+
+fn DiskIoPoller? disk_io_poller_new(Allocator allocator, DiskContext* ctx) {
+    List{DiskIoCounters} list;
+    list.init(allocator);
+    return { .file = file::open("/proc/diskstats", "r")!, .ctx = ctx, .list = list, .allocator = allocator, };
+}
+
+fn void DiskIoPoller.close(&self) {
+    (void)self.file.close();
+    self.list.free();
+}
+
+fn DiskIoCounters[]? DiskIoPoller.poll(&self) {
+    @pool() {
+        self.file.seek(0, FROM_START)!;
+        self.list.clear();
+        while (try line = io::treadline(&self.file)) {
+            if (line.len == 0) continue;
+            String[] fields = split_whitespace(tmem, line.trim());
+            if (try disk = parse_disk_line(self.allocator, fields, self.ctx)) {
+                self.list.push(disk);
+            }
+        }
+        return self.list.array_view();
+    };
+}
+
+<*
+ @require device.len > 0 : "device name must not be empty"
+*>
+fn DiskIoCounters? DiskIoPoller.poll_perdisk(&self, String device) {
+    @pool() {
+        self.file.seek(0, FROM_START)!;
+        while (try line = io::treadline(&self.file)) {
+            if (line.len == 0) continue;
+            String[] fields = split_whitespace(tmem, line.trim());
+            if (fields.len < DISKSTATS_MIN_FIELDS) continue;
+            if (fields[2] != device) continue;
+            return parse_disk_line(self.allocator, fields, self.ctx);
         }
     };
     return NOT_FOUND~;

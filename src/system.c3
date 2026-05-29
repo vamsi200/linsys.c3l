@@ -429,7 +429,6 @@ fn LoadAvg? loadavg() {
     };
 }
 
-
 fn CpuInfo[]? cpu_info(Allocator allocator) {
     @pool() {
         File file = file::open("/proc/cpuinfo", "r")!;
@@ -516,7 +515,7 @@ fn CpuTemp[]? cpu_temps(Allocator allocator) {
             defer (void)tf.close();
 
             File? ty = file::open(type_path, "r");
-            if (catch ty) continue;          
+            if (catch ty) continue;
             defer (void)ty.close();
 
             double current = ((double)(read_file(tmem, tf)!.trim().to_long() ?? 0) / 1000.0);
@@ -559,16 +558,20 @@ fn double? uptime() {
     return fields[0].to_double();
 }
 
-fn String? hostname() {
+fn String? hostname(Allocator allocator) {
     File file = file::open("/proc/sys/kernel/hostname", "r")!;
     defer (void)file.close();
-    return read_file(tmem, file)!.trim().copy(tmem);
+    @pool() {
+        return read_file(tmem, file)!.trim().copy(allocator);
+    };
 }
 
-fn String? kernel_version() {
+fn String? kernel_version(Allocator allocator) {
     File file = file::open("/proc/sys/kernel/osrelease", "r")!;
     defer (void)file.close();
-    return read_file(tmem, file)!.trim().copy(tmem);
+    @pool() {
+        return read_file(tmem, file)!.trim().copy(allocator);
+    };
 }
 
 fn String? os_release(Allocator allocator) {

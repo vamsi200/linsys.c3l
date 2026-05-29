@@ -1,6 +1,15 @@
 module sys;
 import std::io;
 import std::collections::list;
+import std::time;
+
+const ushort AF_INET    = 2;
+const ushort AF_INET6   = 10;
+const uint IFF_UP       = 0x1;
+const uint IFF_LOOPBACK = 0x8;
+
+extern fn CInt getifaddrs(IfAddrs** ifap);
+extern fn void freeifaddrs(IfAddrs* ifa);
 
 struct NetIoCounters {
     String name;
@@ -21,111 +30,6 @@ struct NetIfStats {
     int speed;
     bool duplex_full;
     ulong flags;
-}
-
-fn NetIoCounters[]? net_io_counters(Allocator allocator) {
-    @pool() {
-        File file = file::open("/proc/net/dev", "r")!;
-        defer (void)file.close();
-
-        String content = read_file(tmem, file)!;
-
-        List{NetIoCounters} out;
-        out.init(allocator);
-
-        foreach (i, line : content.split(tmem, "\n")) {
-            if (i < 2 || line.len == 0) {
-                continue;
-            }
-
-            sz? idx = line.index_of_char(':');
-            if (catch idx) continue;
-
-            String iface = line[:idx].trim();
-
-            String[] fields = split_whitespace(tmem, line[idx + 1..].trim());
-
-            if (fields.len < 16) {
-                continue;
-            }
-
-            out.push(
-                {
-                    .name = iface.copy(allocator),
-                    .bytes_recv = fields[0].to_ulong() ?? 0,
-                    .packets_recv = fields[1].to_ulong() ?? 0,
-                    .errin = fields[2].to_ulong() ?? 0,
-                    .dropin = fields[3].to_ulong() ?? 0,
-                    .bytes_sent = fields[8].to_ulong() ?? 0,
-                    .packets_sent = fields[9].to_ulong() ?? 0,
-                    .errout = fields[10].to_ulong() ?? 0,
-                    .dropout = fields[11].to_ulong() ?? 0,
-                }
-            );
-        }
-
-        return out.to_array(allocator);
-    };
-}
-
-
-fn Connection[]? net_connections(Allocator allocator) {
-    List{Connection} list;
-    list.init(allocator);
-
-    read_system_connections(allocator, Protocol.TCP, &list)!;
-
-    read_system_connections(allocator, Protocol.UDP, &list)!;
-
-    return list.to_array(allocator);
-}
-
-fn void? read_system_connections(Allocator allocator, Protocol proto, List{Connection}* out) @private {
-    @pool() {
-        String filename;
-        switch (proto) {
-            case TCP: filename = "/proc/net/tcp";
-            case UDP: filename = "/proc/net/udp";
-            case TCP6: filename = "/proc/net/tcp6";
-            case UDP6: filename = "/proc/net/udp6";
-        }
-        File file = file::open(filename, "r")!;
-        defer (void)file.close();
-
-        String content = read_file(tmem, file)!;
-        bool is_v6     = proto == Protocol.TCP6 || proto == Protocol.UDP6;
-        foreach (i, line : content.split(tmem, "\n")) {
-            if (i == 0 || line.len == 0) continue;
-            String[] fields = split_whitespace(tmem, line.trim());
-            if (fields.len < 4) continue;
-            sz? colon_l = fields[1].index_of_char(':');
-            sz? colon_r = fields[2].index_of_char(':');
-            if (catch colon_l) continue;
-            if (catch colon_r) continue;
-
-            String local_addr  = fields[1][:colon_l];
-            String local_port  = fields[1][colon_l + 1..];
-            String remote_addr = fields[2][:colon_r];
-            String remote_port = fields[2][colon_r + 1..];
-
-            out.push(
-                {
-                    .local_addr = is_v6 ? ip_to_string_v6(
-                        allocator,
-                        parse_addr6(local_addr)
-                    ) : ip_to_string(allocator, parse_addr(local_addr)),
-                    .remote_addr = is_v6 ? ip_to_string_v6(
-                        allocator,
-                        parse_addr6(remote_addr)
-                    ) : ip_to_string(allocator, parse_addr(remote_addr)),
-                    .local_port = (ushort)(local_port.to_long(16) ?? 0),
-                    .remote_port = (ushort)(remote_port.to_long(16) ?? 0),
-                    .state = tcp_state(fields[3]),
-                    .protocol = proto,
-                }
-            );
-        }
-    };
 }
 
 struct IfAddrs {
@@ -161,13 +65,166 @@ struct NetIfAddr {
     bool is_loopback;
 }
 
-const ushort AF_INET    = 2;
-const ushort AF_INET6   = 10;
-const uint IFF_UP       = 0x1;
-const uint IFF_LOOPBACK = 0x8;
+struct NetIoPoller {
+    File file;
+    List{NetIoCounters} list;
+    Allocator allocator;
+}
 
-extern fn CInt getifaddrs(IfAddrs** ifap);
-extern fn void freeifaddrs(IfAddrs* ifa);
+struct NetConnPoller {
+    File file;
+    List{Connection} list;
+    Allocator allocator;
+    Protocol proto;
+}
+
+fn NetIoCounters? parse_net_io_line(Allocator allocator, String line) @private {
+    sz? idx = line.index_of_char(':');
+    if (catch idx) return PARSE_ERROR~;
+
+    String iface = line[:idx].trim();
+
+    String[] fields = split_whitespace(tmem, line[idx + 1..].trim());
+
+    if (fields.len < 16) return PARSE_ERROR~;
+
+    return {
+        .name = iface.copy(allocator),
+        .bytes_recv = fields[0].to_ulong() ?? 0,
+        .packets_recv = fields[1].to_ulong() ?? 0,
+        .errin = fields[2].to_ulong() ?? 0,
+        .dropin = fields[3].to_ulong() ?? 0,
+        .bytes_sent = fields[8].to_ulong() ?? 0,
+        .packets_sent = fields[9].to_ulong() ?? 0,
+        .errout = fields[10].to_ulong() ?? 0,
+        .dropout = fields[11].to_ulong() ?? 0,
+    };
+}
+
+fn NetIoCounters[]? parse_net_io(Allocator allocator, File* file, List{NetIoCounters} list) @private {
+    int i = 0;
+    while (try line = io::treadline(file)) {
+        if (i++ < 2 || line.len == 0) continue;
+        if (try counter = parse_net_io_line(allocator, line)) {
+            list.push(counter);
+        }
+    }
+    return list.to_array(allocator);
+}
+
+fn NetIoPoller? net_io_poller_new(Allocator allocator) {
+    NetIoPoller poller = { .file = file::open("/proc/net/dev", "r")!, .allocator = allocator, };
+    poller.list.init(allocator);
+    return poller;
+}
+
+fn void NetIoPoller.close(&self) {
+    (void)self.file.close();
+    self.list.free();
+}
+
+fn NetIoCounters[]? NetIoPoller.poll(&self) {
+    @pool() {
+        self.file.seek(0, FROM_START)!;
+        return parse_net_io(self.allocator, &self.file, self.list);
+    };
+}
+
+fn NetIoCounters[]? net_io_counters(Allocator allocator) {
+    List{NetIoCounters} list;
+
+    @pool() {
+        File file = file::open("/proc/net/dev", "r")!;
+        defer (void)file.close();
+        return parse_net_io(allocator, &file, list);
+    };
+}
+
+fn NetConnPoller? net_conn_poller_new(Allocator allocator, Protocol proto) {
+    List{Connection} list;
+    list.init(allocator);
+    String filename;
+
+    switch (proto) {
+        case TCP: filename = "/proc/net/tcp";
+        case UDP: filename = "/proc/net/udp";
+        case TCP6: filename = "/proc/net/tcp6";
+        case UDP6: filename = "/proc/net/udp6";
+    }
+
+    return { .file = file::open(filename, "r")!, .list = list, .allocator = allocator, .proto = proto };
+}
+
+fn void NetConnPoller.close(&self) {
+    (void)self.file.close();
+    self.list.free();
+}
+
+fn Connection[]? NetConnPoller.poll(&self) {
+    @pool() {
+        self.file.seek(0, FROM_START)!;
+        return read_system_connections(self.allocator, self.proto, &self.file, self.list);
+    };
+}
+
+fn Connection[]? net_connections(Allocator allocator, Protocol proto) {
+    String filename;
+    List{Connection} out;
+
+    switch (proto) {
+        case TCP: filename = "/proc/net/tcp";
+        case UDP: filename = "/proc/net/udp";
+        case TCP6: filename = "/proc/net/tcp6";
+        case UDP6: filename = "/proc/net/udp6";
+    }
+
+    File file = file::open(filename, "r")!;
+    return read_system_connections(allocator, proto, &file, out)!;
+}
+
+fn Connection[]? read_system_connections(
+    Allocator allocator,
+    Protocol proto,
+    File* file,
+    List{Connection} out
+) @private {
+    @pool() {
+        String content = read_file(tmem, *file)!;
+        bool is_v6     = proto == Protocol.TCP6 || proto == Protocol.UDP6;
+        foreach (i, line : content.split(tmem, "\n")) {
+            if (i == 0 || line.len == 0) continue;
+            String[] fields = split_whitespace(tmem, line.trim());
+            if (fields.len < 4) continue;
+            sz? colon_l = fields[1].index_of_char(':');
+            sz? colon_r = fields[2].index_of_char(':');
+            if (catch colon_l) continue;
+            if (catch colon_r) continue;
+
+            String local_addr  = fields[1][:colon_l];
+            String local_port  = fields[1][colon_l + 1..];
+            String remote_addr = fields[2][:colon_r];
+            String remote_port = fields[2][colon_r + 1..];
+
+            out.push(
+                {
+                    .local_addr = is_v6 ? ip_to_string_v6(
+                        allocator,
+                        parse_addr6(local_addr)
+                    ) : ip_to_string(allocator, parse_addr(local_addr)),
+                    .remote_addr = is_v6 ? ip_to_string_v6(
+                        allocator,
+                        parse_addr6(remote_addr)
+                    ) : ip_to_string(allocator, parse_addr(remote_addr)),
+                    .local_port = (ushort)(local_port.to_long(16) ?? 0),
+                    .remote_port = (ushort)(remote_port.to_long(16) ?? 0),
+                    .state = tcp_state(fields[3]),
+                    .protocol = proto,
+                }
+            );
+        }
+        return out.to_array(allocator);
+    };
+}
 
 fn String sockaddr_to_string(Allocator allocator, void* sa) @private {
     if (sa == null) return "";
@@ -251,7 +308,8 @@ fn NetIfStats[]? net_if_stats(Allocator allocator) {
         stats.init(allocator);
 
         foreach (entry : list) {
-            String iface = entry.file_tbasename()!;
+            String? iface = entry.file_tbasename();
+            if (catch iface) continue;
 
             NetIfStats st = { .name = iface.copy(allocator), };
 
