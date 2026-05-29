@@ -139,13 +139,16 @@ fn MemoryMap[]? maps(Allocator allocator, int pid)
 fn OpenFile[]? open_files(Allocator allocator, int pid)
 
 fn Connection[]? connections(Allocator allocator, int pid)
-
+macro ulong boot_time()
 fn double? create_time(int pid)
+macro ulong clktck()
 
 fn CpuTimes? cpu_times(int pid)
 fn CpuTimes? cpu_times_threads(int pid, int tid)
-
+fn CpuSnapshot? cpu_snapshot(int pid)
+fn double? cpu_percent_from(CpuSnapshot first, int pid)
 fn double? cpu_percent(int pid, double interval)
+
 fn double? memory_percent(int pid)
 
 fn IoCounters? io_counters(int pid)
@@ -183,15 +186,15 @@ fn SystemCpuTimes? sys_cpu_times()
 
 fn SystemCpuTimes[]? cpu_times_percpu(Allocator allocator)
 
-fn CpuSnapshot? cpu_snapshot()
-fn CpuSnapshot[]? cpu_snapshot_percpu(Allocator allocator)
+fn SystemCpuSnapshot? cpu_snapshot()
+fn SystemCpuSnapshot[]? cpu_snapshot_percpu(Allocator allocator)
 
 fn double sys_cpu_percent(CpuSnapshot old, CpuSnapshot new)
 
 fn double[]? sys_cpu_percent_percpu(
     Allocator allocator,
-    CpuSnapshot[] old,
-    CpuSnapshot[] new
+    SystemCpuSnapshot[] old,
+    SystemCpuSnapshot[] new
 )
 
 fn CpuCount? cpu_count()
@@ -208,6 +211,10 @@ fn CpuInfo[]? cpu_info(Allocator allocator)
 fn CpuTemp[]? cpu_temps(Allocator allocator)
 
 fn CpuUsage cpu_usage(SystemCpuTimes old, SystemCpuTimes new)
+fn double? uptime()
+fn String? hostname(Allocator allocator)
+fn String? kernel_version(Allocator allocator)
+fn String? os_release(Allocator allocator)
 ```
 
 </details>
@@ -233,6 +240,7 @@ fn DiskPartition[]? disk_partitions(Allocator allocator)
 fn DiskUsage? disk_usage(String path)
 
 fn DiskIoCounters[]? disk_io_counters(Allocator allocator)
+fn DiskIoCounters? disk_io_counters_perdisk(Allocator allocator, String device, DiskContext* ctx)
 ```
 
 </details>
