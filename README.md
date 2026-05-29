@@ -117,3 +117,4 @@ Get info using:
 ```bash
 c3c docgen
 ```
+![Docs](window.png)
