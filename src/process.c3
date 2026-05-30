@@ -1,4 +1,4 @@
-module sys;
+module linsys;
 import std::io;
 import std::io::file;
 import libc;
@@ -1053,7 +1053,7 @@ fn int[]? cpu_affinity_get(Allocator allocator, int pid) {
         }
     }
     int[] output = mem::alloc::alloc_array(allocator, int, count);
-    output[..count] = tmp[:count];
+    output[:count] = tmp[:count];
     return output;
 }
 

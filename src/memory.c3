@@ -1,4 +1,4 @@
-module sys;
+module linsys;
 import std::io;
 
 struct VirtualMemory {
