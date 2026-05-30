@@ -72,10 +72,11 @@ struct NetIoPoller {
 }
 
 struct NetConnPoller {
-    File file;
+    File[4] files;
+    Protocol[4] protos;
+    usz count;
     List{Connection} list;
     Allocator allocator;
-    Protocol proto;
 }
 
 fn NetIoCounters? parse_net_io_line(Allocator allocator, String line) @private {
@@ -112,21 +113,55 @@ fn NetIoCounters[]? parse_net_io(Allocator allocator, File* file, List{NetIoCoun
     return list.to_array(allocator);
 }
 
-fn NetIoPoller? net_io_poller_new(Allocator allocator) {
-    NetIoPoller poller = { .file = file::open("/proc/net/dev", "r")!, .allocator = allocator, };
-    poller.list.init(allocator);
-    return poller;
+const Protocol[] ALL_PROTOCOLS = { TCP, UDP, TCP6, UDP6 };
+
+fn String protocol_file(Protocol proto) @private {
+    switch (proto) {
+        case TCP: return "/proc/net/tcp";
+        case UDP: return "/proc/net/udp";
+        case TCP6: return "/proc/net/tcp6";
+        case UDP6: return "/proc/net/udp6";
+    }
 }
 
-fn void NetIoPoller.close(&self) {
-    (void)self.file.close();
+fn Connection[]? net_connections(Allocator allocator, Protocol[] protos = ALL_PROTOCOLS) {
+    List{Connection} out;
+    out.init(allocator);
+    foreach (proto : protos) {
+        File file = file::open(protocol_file(proto), "r")!;
+        defer (void)file.close();
+        read_system_connections(allocator, proto, &file, &out)!;
+    }
+    return out.to_array(allocator);
+}
+
+fn NetConnPoller? net_conn_poller_new(Allocator allocator, Protocol[] protos = ALL_PROTOCOLS) {
+    NetConnPoller p;
+    p.allocator = allocator;
+    p.list.init(allocator);
+    p.count = protos.len;
+    foreach (i, proto : protos) {
+        p.protos[i] = proto;
+        p.files[i] = file::open(protocol_file(proto), "r")!;
+    }
+    return p;
+}
+
+fn void NetConnPoller.close(&self) {
+    for (usz i = 0; i < self.count; i++) {
+        (void)self.files[i].close();
+    }
     self.list.free();
 }
 
-fn NetIoCounters[]? NetIoPoller.poll(&self) {
+fn Connection[]? NetConnPoller.poll(&self) {
     @pool() {
-        self.file.seek(0, FROM_START)!;
-        return parse_net_io(self.allocator, &self.file, self.list);
+        self.list.clear();
+        for (usz i = 0; i < self.count; i++) {
+            self.files[i].seek(0, FROM_START)!;
+            read_system_connections(self.allocator, self.protos[i], &self.files[i], &self.list)!;
+        }
+        return self.list.array_view();
     };
 }
 
@@ -140,59 +175,12 @@ fn NetIoCounters[]? net_io_counters(Allocator allocator) {
     };
 }
 
-fn NetConnPoller? net_conn_poller_new(Allocator allocator, Protocol proto) {
-    List{Connection} list;
-    list.init(allocator);
-    String filename;
-
-    switch (proto) {
-        case TCP: filename = "/proc/net/tcp";
-        case UDP: filename = "/proc/net/udp";
-        case TCP6: filename = "/proc/net/tcp6";
-        case UDP6: filename = "/proc/net/udp6";
-    }
-
-    return { .file = file::open(filename, "r")!, .list = list, .allocator = allocator, .proto = proto };
-}
-
-fn void NetConnPoller.close(&self) {
-    (void)self.file.close();
-    self.list.free();
-}
-
-fn Connection[]? NetConnPoller.poll(&self) {
+fn void? read_system_connections(Allocator allocator, Protocol proto, File* file, List{Connection}* out) @private {
     @pool() {
-        self.file.seek(0, FROM_START)!;
-        return read_system_connections(self.allocator, self.proto, &self.file, self.list);
-    };
-}
-
-fn Connection[]? net_connections(Allocator allocator, Protocol proto) {
-    String filename;
-    List{Connection} out;
-
-    switch (proto) {
-        case TCP: filename = "/proc/net/tcp";
-        case UDP: filename = "/proc/net/udp";
-        case TCP6: filename = "/proc/net/tcp6";
-        case UDP6: filename = "/proc/net/udp6";
-    }
-
-    File file = file::open(filename, "r")!;
-    return read_system_connections(allocator, proto, &file, out)!;
-}
-
-fn Connection[]? read_system_connections(
-    Allocator allocator,
-    Protocol proto,
-    File* file,
-    List{Connection} out
-) @private {
-    @pool() {
-        String content = read_file(tmem, *file)!;
-        bool is_v6     = proto == Protocol.TCP6 || proto == Protocol.UDP6;
-        foreach (i, line : content.split(tmem, "\n")) {
-            if (i == 0 || line.len == 0) continue;
+        bool is_v6 = proto == Protocol.TCP6 || proto == Protocol.UDP6;
+        int i      = 0;
+        while (try line = io::treadline(file)) {
+            if (i++ == 0 || line.len == 0) continue;
             String[] fields = split_whitespace(tmem, line.trim());
             if (fields.len < 4) continue;
             sz? colon_l = fields[1].index_of_char(':');
@@ -222,7 +210,6 @@ fn Connection[]? read_system_connections(
                 }
             );
         }
-        return out.to_array(allocator);
     };
 }
 

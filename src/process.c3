@@ -125,6 +125,11 @@ struct CpuSnapshot {
     ulong total_time;
 }
 
+struct ProcessPoller {
+    int pid;
+    CpuSnapshot last_snapshot;
+}
+
 <*
  @require pid > 0 : "pid must be positive"
 *>
@@ -835,6 +840,38 @@ fn CpuTimes? cpu_times_threads(int pid, int tid) {
     String p = string::tformat("/proc/%d/task/%d/stat", pid, tid);
     return cpu_times_parse(p)!;
 }
+
+<*
+ @require pid > 0 : "pid must be positive"
+*>
+fn ProcessPoller? process_poller_new(int pid) {
+    return { .pid = pid, .last_snapshot = cpu_snapshot(pid)!, };
+}
+
+<*
+ @require self.pid > 0 : "pid must be positive"
+*>
+fn double? ProcessPoller.cpu_percent(&self) {
+    double pct = cpu_percent_from(self.last_snapshot, self.pid)!;
+    self.last_snapshot = cpu_snapshot(self.pid)!;
+    return pct;
+}
+
+<*
+ @require self.pid > 0 : "pid must be positive"
+*>
+fn double? ProcessPoller.memory_percent(&self) {
+    return memory_percent(self.pid);
+}
+
+<*
+ @require self.pid > 0 : "pid must be positive"
+*>
+fn IoCounters? ProcessPoller.io_counters(&self) {
+    return io_counters(self.pid);
+}
+
+fn bool ProcessPoller.exists(&self) => exists(self.pid);
 
 <*
  @require pid > 0 : "pid must be positive"
