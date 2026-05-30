@@ -60,7 +60,7 @@ fn ulong? read_ulong_file(String path) @private {
     File file = file::open(path, "r")!;
     defer (void)file.close();
 
-    return read_file(tmem, file)!.trim().to_ulong();
+    return io::treadline(&file)!.trim().to_ulong();
 }
 
 fn void? parse_sensor_temperatures(Allocator allocator, SensorPath[] paths, List{SensorTemperature}* out) @private {
@@ -90,7 +90,7 @@ fn SensorPath[]? get_sensor_paths(Allocator allocator) @private {
             String sensor_name;
             if (try File nf = file::open(name_path, "r")) {
                 defer (void)nf.close();
-                sensor_name = read_file(tmem, nf)!.trim().copy(allocator);
+                sensor_name = io::treadline(&nf)!.trim().copy(allocator);
             } else {
                 sensor_name = hwmon.copy(allocator);
             }
@@ -104,6 +104,7 @@ fn SensorPath[]? get_sensor_paths(Allocator allocator) @private {
         }
         return paths.to_array(allocator);
     };
+
 }
 
 fn SensorTemperature[]? sensor_temperatures(Allocator allocator) {
@@ -170,7 +171,7 @@ fn FanPath[]? find_fan_paths(Allocator allocator) @private {
             String sensor_name;
             if (try File nf = file::open(name_path, "r")) {
                 defer (void)nf.close();
-                sensor_name = read_file(tmem, nf)!.trim().copy(allocator);
+                sensor_name = io::treadline(&nf)!.trim().copy(allocator);
             } else {
                 sensor_name = hwmon.copy(allocator);
             }
@@ -254,14 +255,14 @@ fn SensorBattery[]? sensor_battery(Allocator allocator) {
             if (catch tf) continue;
             defer (void)tf.close();
 
-            String type = read_file(tmem, tf)!.trim();
+            String type = io::treadline(&tf)!.trim();
             if (type != "Battery") continue;
             SensorBattery bat = { .name = name.copy(allocator) };
             String status     = string::tformat("%s/status", base);
 
             if (try File sf = file::open(status, "r")) {
                 defer (void)sf.close();
-                bat.status = battery_status(read_file(tmem, sf)!.trim());
+                bat.status = battery_status(io::treadline(&sf)!.trim());
             }
 
             bat.percent = (double)(read_ulong_file(string::tformat("%s/capacity", base)) ?? 0);

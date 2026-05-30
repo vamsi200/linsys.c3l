@@ -110,11 +110,10 @@ fn SystemCpuTimes? sys_cpu_times() {
 fn SystemCpuTimes[]? cpu_times_percpu(Allocator allocator) {
     File file = file::open("/proc/stat", "r")!;
     defer (void)file.close();
-    String content = read_file(tmem, file)!;
     List{SystemCpuTimes} cpus;
     cpus.init(allocator);
 
-    foreach (line : content.split(tmem, "\n")) {
+    while (try line = io::treadline(&file)) {
         if (!line.starts_with("cpu")) {
             continue;
         }
@@ -149,9 +148,8 @@ fn SystemCpuTimes[]? cpu_times_percpu(Allocator allocator) {
 fn SystemCpuSnapshot? sys_cpu_snapshot() {
     File file = file::open("/proc/stat", "r")!;
     defer (void)file.close();
-    String content = read_file(tmem, file)!;
 
-    foreach (line : content.split(tmem, "\n")) {
+    while (try line = io::treadline(&file)) {
         if (!line.starts_with("cpu ")) {
             continue;
         }
@@ -183,13 +181,12 @@ fn SystemCpuSnapshot? sys_cpu_snapshot() {
 fn SystemCpuSnapshot[]? cpu_snapshot_percpu(Allocator allocator) {
     File file = file::open("/proc/stat", "r")!;
     defer (void)file.close();
-    String content = read_file(tmem, file)!;
     List{SystemCpuSnapshot} cs;
     cs.init(allocator);
 
     ulong total = 0;
     ulong idle  = 0;
-    foreach (line : content.split(tmem, "\n")) {
+    while (try line = io::treadline(&file)) {
         if (!line.starts_with("cpu")) continue;
 
         if (line.starts_with("cpu ")) continue;
@@ -251,15 +248,12 @@ fn CpuCount? cpu_count() {
     @pool() {
         File file = file::open("/proc/cpuinfo", "r")!;
         defer (void)file.close();
-
-        String content = read_file(tmem, file)!;
-
         int logical = 0;
 
         List{int} physical_ids;
         physical_ids.init(tmem);
 
-        foreach (line : content.split(tmem, "\n")) {
+        while (try line = io::treadline(&file)) {
             if (line.starts_with("processor")) {
                 logical++;
             }
@@ -433,15 +427,12 @@ fn CpuInfo[]? cpu_info(Allocator allocator) {
     @pool() {
         File file = file::open("/proc/cpuinfo", "r")!;
         defer (void)file.close();
-
-        String content = read_file(tmem, file)!;
-
         List{CpuInfo} infos;
         infos.init(allocator);
 
         CpuInfo current = { };
 
-        foreach (line : content.split(tmem, "\n")) {
+        while (try line = io::treadline(&file)) {
             if (line.len == 0) {
                 infos.push(current);
                 current = { };
@@ -577,8 +568,8 @@ fn String? kernel_version(Allocator allocator) {
 fn String? os_release(Allocator allocator) {
     File file = file::open("/etc/os-release", "r")!;
     defer (void)file.close();
-    String content = read_file(tmem, file)!;
-    foreach (line : content.split(tmem, "\n")) {
+
+    while (try line = io::treadline(&file)) {
         if (!line.starts_with("PRETTY_NAME=")) continue;
         String val = line.strip_prefix("PRETTY_NAME=").trim();
         if (val.len >= 2 && val[0] == '"' && val[val.len - 1] == '"') {
