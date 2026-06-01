@@ -54,7 +54,7 @@ https://github.com/konimarti/c3l
 ### Process Information
 
 ```c
-module sys;
+module linsys;
 
 import std::io;
 
@@ -74,7 +74,7 @@ Output:
 ### Memory Statistics
 
 ```c
-module sys;
+module linsys;
 
 import std::io;
 
@@ -95,7 +95,7 @@ Output:
 ### Disk Usage
 
 ```c
-module sys;
+module linsys;
 
 import std::io;
 
