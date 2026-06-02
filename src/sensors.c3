@@ -63,17 +63,23 @@ fn ulong? read_ulong_file(String path) @private {
     return io::treadline(&file)!.trim().to_ulong();
 }
 
-fn void? parse_sensor_temperatures(Allocator allocator, SensorPath[] paths, List{SensorTemperature}* out) @private {
+fn void? parse_sensor_temperatures(
+    Allocator allocator,
+    SensorPath[] paths,
+    List{SensorTemperature}* out
+) @private {
     foreach (p : paths) {
         ulong? raw = read_ulong_file(p.input);
         if (catch raw) continue;
         double current  = (double)raw / 1000.0;
         double critical = 0.0;
         ulong? crit_raw = read_ulong_file(p.crit);
+
         if (try crit_raw) {
             critical = (double)crit_raw / 1000.0;
         }
-        out.push({ .name = p.name, .current = current, .critical = critical, });
+
+        out.push({ .name = p.name.copy(allocator), .current = current, .critical = critical, });
     }
 }
 
@@ -83,28 +89,38 @@ fn SensorPath[]? get_sensor_paths(Allocator allocator) @private {
         PathList list = io::path::ls(tmem, path)!;
         List{SensorPath} paths;
         paths.init(allocator);
+        defer paths.free();
+
         foreach (entry : list) {
             String hwmon     = entry.file_tbasename()!;
             String base      = string::tformat("/sys/class/hwmon/%s", hwmon);
             String name_path = string::tformat("%s/name", base);
             String sensor_name;
+
             if (try File nf = file::open(name_path, "r")) {
                 defer (void)nf.close();
                 sensor_name = io::treadline(&nf)!.trim().copy(allocator);
             } else {
                 sensor_name = hwmon.copy(allocator);
             }
+
+            defer mem::alloc::free(allocator, sensor_name);
+
             for (int i = 1; i <= 32; i++) {
                 String input = string::tformat("%s/temp%d_input", base, i);
                 ulong? raw   = read_ulong_file(input);
                 if (catch raw) continue;
-                paths.push({ .input = input.copy(allocator), .crit = string::tformat("%s/temp%d_crit", base, i)
-                    .copy(allocator), .name = string::format(allocator, "%s-temp%d", sensor_name, i), });
+                paths.push(
+                    {
+                        .input = input.copy(allocator),
+                        .crit = string::tformat("%s/temp%d_crit", base, i)
+                    .copy(
+                        allocator
+                    ), .name = string::format(allocator, "%s-temp%d", sensor_name, i), });
             }
         }
         return paths.to_array(allocator);
     };
-
 }
 
 fn SensorTemperature[]? sensor_temperatures(Allocator allocator) {
@@ -112,17 +128,29 @@ fn SensorTemperature[]? sensor_temperatures(Allocator allocator) {
         SensorPath[] paths = get_sensor_paths(allocator)!;
         defer {
             foreach (p : paths) {
-                mem::alloc::free(allocator, p.input.ptr);
-                mem::alloc::free(allocator, p.crit.ptr);
-                mem::alloc::free(allocator, p.name.ptr);
+                mem::alloc::free(allocator, p.input);
+                mem::alloc::free(allocator, p.crit);
+                mem::alloc::free(allocator, p.name);
             }
-            mem::alloc::free(allocator, paths.ptr);
+            mem::alloc::free(allocator, paths);
         }
+
         List{SensorTemperature} out;
         out.init(allocator);
+        defer out.free();
+
         parse_sensor_temperatures(allocator, paths, &out)!;
         return out.to_array(allocator);
     };
+}
+
+fn void SensorTemperature[].free(self, Allocator allocator) {
+    foreach (st : self) st.free(allocator);
+    mem::alloc::free(allocator, self);
+}
+
+fn void SensorTemperature.free(self, Allocator allocator) {
+    mem::alloc::free(allocator, self.name);
 }
 
 struct SensorPoller {
@@ -139,18 +167,18 @@ fn SensorPoller? sensor_poller_new(Allocator allocator) {
 
 fn void SensorPoller.close(&self) {
     foreach (p : self.paths) {
-        mem::alloc::free(self.allocator, p.input.ptr);
-        mem::alloc::free(self.allocator, p.crit.ptr);
-        mem::alloc::free(self.allocator, p.name.ptr);
+        mem::alloc::free(self.allocator, p.input);
+        mem::alloc::free(self.allocator, p.crit);
+        mem::alloc::free(self.allocator, p.name);
     }
-    mem::alloc::free(self.allocator, self.paths.ptr);
+    mem::alloc::free(self.allocator, self.paths);
     self.list.free();
 }
 
 fn SensorTemperature[]? SensorPoller.poll(&self) {
     self.list.clear();
     parse_sensor_temperatures(self.allocator, self.paths, &self.list)!;
-    return self.list.array_view();
+    return self.list.to_array(self.allocator);
 }
 
 struct FanPath @private {
@@ -164,6 +192,8 @@ fn FanPath[]? find_fan_paths(Allocator allocator) @private {
         PathList list = io::path::ls(tmem, path)!;
         List{FanPath} paths;
         paths.init(allocator);
+        defer paths.free();
+
         foreach (entry : list) {
             String hwmon     = entry.file_tbasename()!;
             String base      = string::tformat("/sys/class/hwmon/%s", hwmon);
@@ -175,12 +205,18 @@ fn FanPath[]? find_fan_paths(Allocator allocator) @private {
             } else {
                 sensor_name = hwmon.copy(allocator);
             }
+
+            defer mem::alloc::free(allocator, sensor_name);
+
             for (int i = 1; i <= 32; i++) {
                 String input = string::tformat("%s/fan%d_input", base, i);
                 ulong? raw   = read_ulong_file(input);
                 if (catch raw) continue;
                 paths.push(
-                    { .input = input.copy(allocator), .name = string::format(allocator, "%s-fan%d", sensor_name, i), }
+                    {
+                        .input = input.copy(allocator),
+                        .name = string::format(allocator, "%s-fan%d", sensor_name, i),
+                    }
                 );
             }
         }
@@ -192,7 +228,7 @@ fn void? parse_sensor_fans(Allocator allocator, FanPath[] paths, List{SensorFan}
     foreach (p : paths) {
         ulong? raw = read_ulong_file(p.input);
         if (catch raw) continue;
-        out.push({ .name = p.name, .current = (int)raw, });
+        out.push({ .name = p.name.copy(allocator), .current = (int)raw, });
     }
 }
 
@@ -201,17 +237,25 @@ fn SensorFan[]? sensor_fans(Allocator allocator) {
         FanPath[] paths = find_fan_paths(allocator)!;
         defer {
             foreach (p : paths) {
-                mem::alloc::free(allocator, p.input.ptr);
-                mem::alloc::free(allocator, p.name.ptr);
+                mem::alloc::free(allocator, p.input);
+                mem::alloc::free(allocator, p.name);
             }
-            mem::alloc::free(allocator, paths.ptr);
+            mem::alloc::free(allocator, paths);
         }
         List{SensorFan} out;
         out.init(allocator);
+        defer out.free();
         parse_sensor_fans(allocator, paths, &out)!;
         return out.to_array(allocator);
     };
 }
+
+fn void SensorFan[].free(self, Allocator allocator) {
+    foreach (sf : self) sf.free(allocator);
+    mem::alloc::free(allocator, self);
+}
+
+fn void SensorFan.free(self, Allocator allocator) => mem::alloc::free(allocator, self.name);
 
 struct FanPoller {
     FanPath[] paths;
@@ -227,8 +271,8 @@ fn FanPoller? fan_poller_new(Allocator allocator) {
 
 fn void FanPoller.close(&self) {
     foreach (p : self.paths) {
-        mem::alloc::free(self.allocator, p.input.ptr);
-        mem::alloc::free(self.allocator, p.name.ptr);
+        mem::alloc::free(self.allocator, p.input);
+        mem::alloc::free(self.allocator, p.name);
     }
     mem::alloc::free(self.allocator, self.paths.ptr);
     self.list.free();
@@ -237,7 +281,7 @@ fn void FanPoller.close(&self) {
 fn SensorFan[]? FanPoller.poll(&self) {
     self.list.clear();
     parse_sensor_fans(self.allocator, self.paths, &self.list)!;
-    return self.list.array_view();
+    return self.list.to_array(self.allocator);
 }
 
 fn SensorBattery[]? sensor_battery(Allocator allocator) {
@@ -246,6 +290,7 @@ fn SensorBattery[]? sensor_battery(Allocator allocator) {
         PathList list = io::path::ls(tmem, path)!;
         List{SensorBattery} bats;
         bats.init(allocator);
+	defer bats.free();
 
         foreach (entry : list) {
             String name      = entry.file_tbasename()!;
@@ -278,3 +323,10 @@ fn SensorBattery[]? sensor_battery(Allocator allocator) {
         return bats.to_array(allocator);
     };
 }
+
+fn void SensorBattery[].free(self, Allocator allocator) {
+	foreach (sb: self) sb.free(allocator);
+	mem::alloc::free(allocator, self);
+}
+
+fn void SensorBattery.free(self, Allocator allocator) => mem::alloc::free(allocator, self.name);

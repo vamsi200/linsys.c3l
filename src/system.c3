@@ -112,7 +112,7 @@ fn SystemCpuTimes[]? cpu_times_percpu(Allocator allocator) {
     defer (void)file.close();
     List{SystemCpuTimes} cpus;
     cpus.init(allocator);
-
+	defer cpus.free();	
     while (try line = io::treadline(&file)) {
         if (!line.starts_with("cpu")) {
             continue;
@@ -183,6 +183,7 @@ fn SystemCpuSnapshot[]? cpu_snapshot_percpu(Allocator allocator) {
     defer (void)file.close();
     List{SystemCpuSnapshot} cs;
     cs.init(allocator);
+	defer cs.free();
 
     ulong total = 0;
     ulong idle  = 0;
@@ -252,6 +253,7 @@ fn CpuCount? cpu_count() {
 
         List{int} physical_ids;
         physical_ids.init(tmem);
+	defer physical_ids.free();
 
         while (try line = io::treadline(&file)) {
             if (line.starts_with("processor")) {
@@ -324,6 +326,7 @@ fn CpuFreq[]? cpu_freq_percpu(Allocator allocator) {
 
         List{CpuFreq} freqs;
         freqs.init(allocator);
+	defer freqs.free();
 
         foreach (entry : list) {
             String name = entry.file_tbasename()!;
@@ -351,9 +354,10 @@ fn CpuFreq[]? cpu_freq_percpu(Allocator allocator) {
                 File? max = file::open(max_path, "r");
                 if (catch max) continue;
                 defer (void)max.close();
-                String cur_content = read_file(tmem, cur) ?? "";
-                String min_content = read_file(tmem, min) ?? "";
-                String max_content = read_file(tmem, max) ?? "";
+
+                String cur_content = read_file(tmem, cur) ?? "".copy(allocator);
+                String min_content = read_file(tmem, min) ?? "".copy(allocator);
+                String max_content = read_file(tmem, max) ?? "".copy(allocator);
 
                 freqs.push({ .current = (cur_content.trim()
                     .to_ulong() ?? 0) / 1000.0, .min = (min_content.trim()
@@ -429,7 +433,7 @@ fn CpuInfo[]? cpu_info(Allocator allocator) {
         defer (void)file.close();
         List{CpuInfo} infos;
         infos.init(allocator);
-
+	defer infos.free();
         CpuInfo current = { };
 
         while (try line = io::treadline(&file)) {
@@ -480,6 +484,16 @@ fn CpuInfo[]? cpu_info(Allocator allocator) {
     };
 }
 
+fn void CpuInfo[].free(self, Allocator allocator) {
+	foreach (ci: self) ci.free(allocator);
+	mem::alloc::free(allocator, self);
+}
+
+fn void CpuInfo.free(self, Allocator allocator) {
+	mem::alloc::free(allocator, self.vendor);
+	mem::alloc::free(allocator, self.model);
+	mem::alloc::free(allocator, self.flags);
+}
 
 fn CpuTemp[]? cpu_temps(Allocator allocator) {
     @pool() {
@@ -489,6 +503,7 @@ fn CpuTemp[]? cpu_temps(Allocator allocator) {
 
         List{CpuTemp} temps;
         temps.init(allocator);
+	defer temps.free();
 
         foreach (entry : list) {
             String name = entry.file_tbasename()!;
@@ -520,6 +535,12 @@ fn CpuTemp[]? cpu_temps(Allocator allocator) {
     };
 }
 
+fn void CpuTemp[].free(self, Allocator allocator) {
+	foreach (ct: self) ct.free(allocator);
+	mem::alloc::free(allocator, self);
+}
+
+fn void CpuTemp.free(self, Allocator allocator) => mem::alloc::free(allocator, self.sensor);
 
 fn CpuUsage cpu_usage(SystemCpuTimes old, SystemCpuTimes new) {
     double old_total = old.user + old.nice + old.system + old.idle + old.iowait + old.irq + old.softirq + old.steal;

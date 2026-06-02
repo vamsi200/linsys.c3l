@@ -65,6 +65,7 @@ fn DiskPartition[]? disk_partitions(Allocator allocator) {
 
         List{DiskPartition} parts;
         parts.init(allocator);
+        defer parts.free();
 
         foreach (line : content.split(tmem, "\n")) {
             if (line.len == 0) {
@@ -89,6 +90,18 @@ fn DiskPartition[]? disk_partitions(Allocator allocator) {
 
         return parts.to_array(allocator);
     };
+}
+
+fn void DiskPartition[].free(self, Allocator allocator) {
+    foreach (dp : self) dp.free(allocator);
+    mem::alloc::free(allocator, self);
+}
+
+fn void DiskPartition.free(self, Allocator allocator) {
+    mem::alloc::free(allocator, self.device);
+    mem::alloc::free(allocator, self.mountpoint);
+    mem::alloc::free(allocator, self.filesystem);
+    mem::alloc::free(allocator, self.options);
 }
 
 <*
@@ -145,16 +158,21 @@ fn ulong DiskContext.get_sector_size(&self, String device) {
         self.cache_mutex.lock();
         defer self.cache_mutex.unlock();
         if (try ulong existing = self.sector_size_cache.get(device)) return existing;
-        self.sector_size_cache.set(device.copy(self.allocator), size);
+        self.sector_size_cache.set(device, size);
         return size;
     };
 }
 
 const int DISKSTATS_MIN_FIELDS = 14; // kernel 2.6+
 
-fn DiskIoCounters? parse_disk_line(Allocator allocator, String[] fields, DiskContext* ctx) @private {
+fn DiskIoCounters? parse_disk_line(
+    Allocator allocator,
+    String[] fields,
+    DiskContext* ctx
+) @private {
     if (fields.len < DISKSTATS_MIN_FIELDS) return NOT_FOUND~;
     ulong sector_size = ctx.get_sector_size(fields[2]);
+
     return {
         .name = fields[2].copy(allocator),
         .read_count = fields[3].to_ulong() ?? 0,
@@ -175,6 +193,8 @@ fn DiskIoCounters[]? disk_io_counters(Allocator allocator, DiskContext* ctx) {
         defer (void)file.close();
         List{DiskIoCounters} disks;
         disks.init(allocator);
+        defer disks.free();
+
         while (try line = io::treadline(&file)) {
             if (line.len == 0) continue;
             String[] fields = split_whitespace(tmem, line.trim());
@@ -184,6 +204,15 @@ fn DiskIoCounters[]? disk_io_counters(Allocator allocator, DiskContext* ctx) {
         }
         return disks.to_array(allocator);
     };
+}
+
+fn void DiskIoCounters[].free(self, Allocator allocator) {
+    foreach (di : self) di.free(allocator);
+    mem::alloc::free(allocator, self);
+}
+
+fn void DiskIoCounters.free(self, Allocator allocator) {
+    mem::alloc::free(allocator, self.name);
 }
 
 <*
@@ -214,11 +243,19 @@ struct DiskIoPoller {
 fn DiskIoPoller? disk_io_poller_new(Allocator allocator, DiskContext* ctx) {
     List{DiskIoCounters} list;
     list.init(allocator);
-    return { .file = file::open("/proc/diskstats", "r")!, .ctx = ctx, .list = list, .allocator = allocator, };
+    return {
+        .file = file::open("/proc/diskstats", "r")!,
+        .ctx = ctx,
+        .list = list,
+        .allocator = allocator,
+    };
 }
 
 fn void DiskIoPoller.close(&self) {
     (void)self.file.close();
+    foreach (d : self.list.array_view()) {
+        d.free(self.allocator);
+    }
     self.list.free();
 }
 

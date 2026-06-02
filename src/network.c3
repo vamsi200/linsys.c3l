@@ -102,7 +102,11 @@ fn NetIoCounters? parse_net_io_line(Allocator allocator, String line) @private {
     };
 }
 
-fn NetIoCounters[]? parse_net_io(Allocator allocator, File* file, List{NetIoCounters} list) @private {
+fn NetIoCounters[]? parse_net_io(
+    Allocator allocator,
+    File* file,
+    List{NetIoCounters} list
+) @private {
     int i = 0;
     while (try line = io::treadline(file)) {
         if (i++ < 2 || line.len == 0) continue;
@@ -127,11 +131,14 @@ fn String protocol_file(Protocol proto) @private {
 fn Connection[]? net_connections(Allocator allocator, Protocol[] protos = ALL_PROTOCOLS) {
     List{Connection} out;
     out.init(allocator);
+    defer out.free();
+
     foreach (proto : protos) {
         File file = file::open(protocol_file(proto), "r")!;
         defer (void)file.close();
         read_system_connections(allocator, proto, &file, &out)!;
     }
+
     return out.to_array(allocator);
 }
 
@@ -140,10 +147,12 @@ fn NetConnPoller? net_conn_poller_new(Allocator allocator, Protocol[] protos = A
     p.allocator = allocator;
     p.list.init(allocator);
     p.count = protos.len;
+
     foreach (i, proto : protos) {
         p.protos[i] = proto;
         p.files[i] = file::open(protocol_file(proto), "r")!;
     }
+
     return p;
 }
 
@@ -151,6 +160,10 @@ fn void NetConnPoller.close(&self) {
     for (usz i = 0; i < self.count; i++) {
         (void)self.files[i].close();
     }
+    foreach (e : self.list) {
+        e.free(self.allocator);
+    }
+
     self.list.free();
 }
 
@@ -167,6 +180,7 @@ fn Connection[]? NetConnPoller.poll(&self) {
 
 fn NetIoCounters[]? net_io_counters(Allocator allocator) {
     List{NetIoCounters} list;
+    defer list.free();
 
     @pool() {
         File file = file::open("/proc/net/dev", "r")!;
@@ -175,7 +189,19 @@ fn NetIoCounters[]? net_io_counters(Allocator allocator) {
     };
 }
 
-fn void? read_system_connections(Allocator allocator, Protocol proto, File* file, List{Connection}* out) @private {
+fn void NetIoCounters[].free(self, Allocator allocator) {
+    foreach (ni : self) ni.free(allocator);
+    mem::alloc::free(allocator, self);
+}
+
+fn void NetIoCounters.free(self, Allocator allocator) => mem::alloc::free(allocator, self.name);
+
+fn void? read_system_connections(
+    Allocator allocator,
+    Protocol proto,
+    File* file,
+    List{Connection}* out
+) @private {
     @pool() {
         bool is_v6 = proto == Protocol.TCP6 || proto == Protocol.UDP6;
         int i      = 0;
@@ -262,6 +288,7 @@ fn NetIfAddr[]? net_if_addrs(Allocator allocator) {
 
     List{NetIfAddr} list;
     list.init(allocator);
+    defer list.free();
 
     IfAddrs* cur = head;
     while (cur != null) {
@@ -285,6 +312,17 @@ fn NetIfAddr[]? net_if_addrs(Allocator allocator) {
     return list.to_array(allocator);
 }
 
+fn void NetIfAddr[].free(self, Allocator allocator) {
+	foreach (ni: self) ni.free(allocator);
+	mem::alloc::free(allocator, self);	
+}
+
+fn void NetIfAddr.free(self, Allocator allocator) {
+	mem::alloc::free(allocator, self.name);
+	mem::alloc::free(allocator, self.address);
+	mem::alloc::free(allocator, self.netmask);
+}
+
 fn NetIfStats[]? net_if_stats(Allocator allocator) {
     @pool() {
         Path path = path::new(tmem, "/sys/class/net")!;
@@ -293,6 +331,7 @@ fn NetIfStats[]? net_if_stats(Allocator allocator) {
 
         List{NetIfStats} stats;
         stats.init(allocator);
+	defer stats.free();
 
         foreach (entry : list) {
             String? iface = entry.file_tbasename();
@@ -306,9 +345,7 @@ fn NetIfStats[]? net_if_stats(Allocator allocator) {
 
             if (try File f = file::open(oper, "r")) {
                 defer (void)f.close();
-
                 String state = read_file(tmem, f)!.trim();
-
                 st.is_up = state == "up";
             }
 
@@ -316,7 +353,6 @@ fn NetIfStats[]? net_if_stats(Allocator allocator) {
 
             if (try File f = file::open(mtu, "r")) {
                 defer (void)f.close();
-
                 st.mtu = read_file(tmem, f)!.trim().to_int() ?? 0;
             }
 
@@ -324,7 +360,6 @@ fn NetIfStats[]? net_if_stats(Allocator allocator) {
 
             if (try File f = file::open(speed, "r")) {
                 defer (void)f.close();
-
                 st.speed = read_file(tmem, f)!.trim().to_int() ?? 0;
             }
 
@@ -332,7 +367,6 @@ fn NetIfStats[]? net_if_stats(Allocator allocator) {
 
             if (try File f = file::open(flags, "r")) {
                 defer (void)f.close();
-
                 st.flags = read_file(tmem, f)!.trim().to_ulong(16) ?? 0;
             }
 
@@ -342,3 +376,10 @@ fn NetIfStats[]? net_if_stats(Allocator allocator) {
         return stats.to_array(allocator);
     };
 }
+
+fn void NetIfStats[].free(self, Allocator allocator) {
+	foreach (ni: self) ni.free(allocator);
+	mem::alloc::free(allocator, self);
+}
+
+fn void NetIfStats.free(self, Allocator allocator) => mem::alloc::free(allocator, self.name);

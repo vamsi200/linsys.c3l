@@ -187,6 +187,7 @@ fn ProcessInfo? get_info(Allocator allocator, int pid) {
                         first = vmrss_idx == -1 ? first : first[:vmrss_idx];
                         if (try ulong vmrss = first.to_ulong()) proc.vm_rss = vmrss;
                     }
+
                 case "State":
                     p.state = proc_state((char)data[0]);
 
@@ -196,11 +197,17 @@ fn ProcessInfo? get_info(Allocator allocator, int pid) {
         }
     };
 
-    proc.exe_path = read_exe(allocator, pid) ?? "";
-    proc.cmdline = read_cmdline(allocator, pid) ?? "";
+    proc.exe_path = read_exe(allocator, pid) ?? "".copy(allocator);
+    proc.cmdline = read_cmdline(allocator, pid) ?? "".copy(allocator);
     proc.process = p;
 
     return proc;
+}
+
+fn void ProcessInfo.free(self, Allocator allocator) {
+    mem::alloc::free(allocator, self.process.name);
+    mem::alloc::free(allocator, self.exe_path);
+    mem::alloc::free(allocator, self.cmdline);
 }
 
 fn ProcState proc_state(char c) @private {
@@ -261,6 +268,13 @@ fn Process? get_proc(Allocator allocator, int pid) {
     return p;
 }
 
+fn void Process[].free(self, Allocator allocator) {
+    foreach (s : self) s.free(allocator);
+    mem::alloc::free(allocator, self);
+}
+
+fn void Process.free(self, Allocator allocator) => mem::alloc::free(allocator, self.name);
+
 <*
  @require pid > 0 : "pid must be positive"
 *>
@@ -280,30 +294,26 @@ fn String? read_cmdline(Allocator allocator, int pid) {
     return content.trim_right().copy(allocator);
 }
 
+fn String? readlink_alloc(Allocator allocator, ZString path) @private {
+    char[256] buf;
+    DString result = dstring::new_with_capacity(allocator, 256);
+    defer result.free();
+
+    while (true) {
+        sz n = libc::readlink(path, &buf, buf.len);
+        if (n < 0) return IO_ERROR~;
+        result.append((String)buf[:n]);
+        if (n < buf.len) break;
+    }
+    return result.copy_str(allocator);
+}
+
 <*
  @require pid > 0 : "pid must be positive"
 *>
 fn String? read_exe(Allocator allocator, int pid) {
     String path = string::tformat("/proc/%d/exe", pid);
-    char[4096] buf;
-
-    sz len = libc::readlink((ZString)path, &buf, buf.len - 1);
-
-    if (len < 0) {
-        switch (libc::errno()) {
-            case EACCES:
-            case EPERM:
-                return PERMISSION_DENIED~;
-
-            case ENOENT:
-                return PROCESS_EXITED~;
-
-            default:
-                return IO_ERROR~;
-        }
-    }
-
-    return ((String)buf[:len]).copy(allocator);
+    return readlink_alloc(allocator, path.zstr_tcopy()) ?? PROCESS_EXITED~;
 }
 
 fn int[]? list_pids(Allocator allocator) {
@@ -335,27 +345,17 @@ fn bool exists(int pid) {
  @require pid > 0 : "pid must be positive"
 *>
 fn String? cwd(Allocator allocator, int pid) {
-    char[4096] buf;
-    String path = string::tformat("/proc/%d/cwd", pid);
-
-    sz len = libc::readlink((ZString)path, &buf, buf.len - 1);
-
-    if (len == 0) return "".copy(allocator);
-    if (len < 0) {
+    String path    = string::tformat("/proc/%d/cwd", pid);
+    String? result = readlink_alloc(allocator, path.zstr_tcopy());
+    if (catch result) {
         switch (libc::errno()) {
             case EACCES:
-            case EPERM:
-                return PERMISSION_DENIED~;
-
-            case ENOENT:
-                return PROCESS_EXITED~;
-
-            default:
-                return IO_ERROR~;
+            case EPERM: return PERMISSION_DENIED~;
+            case ENOENT: return PROCESS_EXITED~;
+            default: return IO_ERROR~;
         }
     }
-
-    return ((String)buf[:len]).copy(allocator);
+    return result;
 }
 
 <*
@@ -367,7 +367,6 @@ fn EnvVar[]? environ(Allocator allocator, int pid) {
     defer (void)file.close();
     String content = read_file(tmem, file)!;
     String[] s     = content.split(tmem, "\0");
-
     List{EnvVar} ev;
     ev.init(allocator);
 
@@ -375,9 +374,24 @@ fn EnvVar[]? environ(Allocator allocator, int pid) {
         long? idx = line.index_of_char('=');
         if (catch idx) continue;
         if (idx == -1) continue;
-        ev.push({ .key = line[:idx].trim().copy(allocator), .value = line[idx + 1..].trim().copy(allocator), });
+        ev.push({ .key = line[:idx].trim()
+            .copy(allocator), .value = line[idx + 1..].trim().copy(allocator) });
     }
+
+    defer ev.free();
     return ev.to_array(allocator);
+}
+
+fn void EnvVar[].free(&self, Allocator alloc) {
+    foreach (env : self) {
+        env.free(alloc);
+    }
+    mem::alloc::free(alloc, self);
+}
+
+fn void EnvVar.free(&self, Allocator allocator) {
+    mem::alloc::free(allocator, self.key);
+    mem::alloc::free(allocator, self.value);
 }
 
 <*
@@ -388,7 +402,9 @@ fn String? environ_get(Allocator allocator, int pid, String key) {
     String path = string::tformat("/proc/%d/environ", pid);
     File file   = file::open(path, "r")!;
     defer (void)file.close();
+
     String content = read_file(tmem, file)!;
+
     foreach (line : content.split(tmem, "\0")) {
         long? idx = line.index_of_char('=');
         if (catch idx) continue;
@@ -410,15 +426,15 @@ fn String[]? fd_paths(Allocator allocator, int pid) {
         String proc_fd = string::tformat("/proc/%d/fd", pid);
         Path path      = path::new(tmem, proc_fd)!;
         PathList list  = io::path::ls(tmem, path)!;
-        char[4096] buf;
+
         foreach (l : list) {
-            String full   = string::tformat("%s/%s", proc_fd, l.file_tbasename()!);
-            ZString zpath = full.zstr_tcopy();
-            sz n          = libc::readlink(zpath, &buf, buf.len - 1);
-            if (n < 0) continue;
-            fds.push(((String)buf[:n]).copy(allocator));
+            String full = string::tformat("%s/%s", proc_fd, l.file_tbasename()!);
+            if (try String target = readlink_alloc(allocator, full.zstr_tcopy())) {
+                fds.push(target);
+            }
         }
     };
+
     defer fds.free();
     return fds.to_array(allocator);
 }
@@ -456,24 +472,42 @@ fn MemoryMap[]? maps(Allocator allocator, int pid) {
         File file = file::open(p, "r")!;
         defer (void)file.close();
         String content = read_file(tmem, file)!;
+
         foreach (line : content.tsplit("\n")) {
             if (line.len == 0) continue;
             String[] split = split_whitespace(tmem, line);
             if (split.len < 5) continue;
+
             MemoryMap entry = {
                 .address_range = split[0].copy(allocator),
                 .perms = split[1].copy(allocator),
                 .device = split[3].copy(allocator),
             };
+
             if (try long o = split[2].to_long()) entry.offset = o;
             if (try long n = split[4].to_long()) entry.inode = n;
-            if (split.len > 5) entry.pathname = string::tjoin(split[5..], " ").trim().copy(allocator);
+            if (split.len > 5) entry.pathname = string::tjoin(split[5..], " ").trim()
+                .copy(allocator);
             mm.push(entry);
         }
     };
 
     defer mm.free();
     return mm.to_array(allocator);
+}
+
+fn void MemoryMap.free(&self, Allocator allocator) {
+    mem::alloc::free(allocator, self.address_range);
+    mem::alloc::free(allocator, self.perms);
+    mem::alloc::free(allocator, self.device);
+    mem::alloc::free(allocator, self.pathname);
+}
+
+fn void MemoryMap[].free(self, Allocator allocator) {
+    foreach (m : self) {
+        m.free(allocator);
+    }
+    defer mem::alloc::free(allocator, self);
 }
 
 struct FlagInfo {
@@ -525,41 +559,51 @@ fn OpenFile[]? open_files(Allocator allocator, int pid) {
 
     @pool() {
         int[] fd_list = fds(tmem, pid)!;
-        char[4096] link_buf;
         foreach (fd : fd_list) {
             String fd_path = string::tformat("/proc/%d/fd/%d", pid, fd);
             if (!os::native_file_or_dir_exists(fd_path)) continue;
-            ZString zpath = fd_path.zstr_tcopy();
-            sz n          = libc::readlink(zpath, &link_buf, link_buf.len - 1);
 
-            if (n < 0) continue;
-            String target = (String)link_buf[0:n];
+            if (try String target = readlink_alloc(allocator, fd_path.zstr_tcopy())) {
+                if (!target.starts_with("/") || target.ends_with(" (deleted)")) continue;
 
-            if (!target.starts_with("/") || target.ends_with(" (deleted)")) continue;
-            if (!os::native_file_or_dir_exists(target)) continue;
+                if (!os::native_file_or_dir_exists(target)) continue;
 
-            OpenFile entry   = { .fd = fd, .path = target.copy(allocator) };
-            String info_path = string::tformat("/proc/%d/fdinfo/%d", pid, fd);
-            File file        = file::open(info_path, "r")!;
-            defer (void)file.close();
-
-            while (try line = io::treadline(&file)) {
-                line = line.trim();
-                if (!line.starts_with("flags:")) continue;
-                String flags_str = line["flags:".len..].trim();
-                if (try int flags = flags_str.to_int(8)) {
-                    entry.mode = flags_to_mode(flags, allocator);
+                OpenFile entry   = { .fd = fd, .path = target };
+                String info_path = string::tformat("/proc/%d/fdinfo/%d", pid, fd);
+                File file        = file::open(info_path, "r")!;
+                defer (void)file.close();
+                while (try line = io::treadline(&file)) {
+                    line = line.trim();
+                    if (!line.starts_with("flags:")) continue;
+                    String flags_str = line["flags:".len..].trim();
+                    if (try int flags = flags_str.to_int(8)) {
+                        entry.mode = flags_to_mode(flags, allocator);
+                    }
+                    break;
                 }
-                break;
+                of.push(entry);
             }
-            of.push(entry);
         }
     };
+
     defer of.free();
     return of.to_array(allocator);
 }
 
-fn void? read_connections(Allocator allocator, int pid, Protocol proto, List{Connection}* out) @private {
+
+fn void OpenFile[].free(self, Allocator allocator) {
+    foreach (of : self) {
+        mem::alloc::free(allocator, of.path);
+        mem::alloc::free(allocator, of.mode);
+    }
+}
+
+fn void? read_connections(
+    Allocator allocator,
+    int pid,
+    Protocol proto,
+    List{Connection}* out
+) @private {
     @pool() {
         String filename;
 
@@ -620,7 +664,7 @@ fn void? read_connections(Allocator allocator, int pid, Protocol proto, List{Con
 fn Connection[]? connections(Allocator allocator, int pid) {
     List{Connection} list;
     list.init(allocator);
-    defer catch list.free();
+    defer list.free();
 
     read_connections(allocator, pid, Protocol.TCP, &list)!;
     read_connections(allocator, pid, Protocol.UDP, &list)!;
@@ -628,6 +672,16 @@ fn Connection[]? connections(Allocator allocator, int pid) {
     read_connections(allocator, pid, Protocol.UDP6, &list)!;
 
     return list.to_array(allocator);
+}
+
+fn void Connection[].free(self, Allocator allocator) {
+    foreach (c : self) c.free(allocator);
+    mem::alloc::free(allocator, self);
+}
+
+fn void Connection.free(self, Allocator allocator) {
+    mem::alloc::free(allocator, self.local_addr);
+    mem::alloc::free(allocator, self.remote_addr);
 }
 
 macro ulong boot_time() {
@@ -833,7 +887,8 @@ fn ulong? read_total_cpu_time() {
 
     if (split.len < 8) return 0;
 
-    return split[0].to_ulong()! + split[1].to_ulong()! + split[2].to_ulong()! + split[3].to_ulong()!
+    return split[0].to_ulong()! + split[1].to_ulong()! + split[2].to_ulong()!
+        + split[3].to_ulong()!
         + split[4].to_ulong()!
         + split[5].to_ulong()!
         + split[6].to_ulong()!
@@ -845,10 +900,8 @@ fn ulong? parse_proc_ulong(String path, String key) @private {
     @pool() {
         File file = file::open(path, "r")!;
         defer (void)file.close();
-        char[4096] buf;
-        sz n           = file.read(&buf)!;
-        String[] lines = ((String)buf[:n]).split(tmem, "\n");
-        foreach (line : lines) {
+
+        while (try line = io::treadline(&file)) {
             if (!line.starts_with(key)) continue;
             String[] s = line.trim().split(tmem, ":");
             if (s.len < 2) continue;
@@ -881,10 +934,8 @@ fn IoCounters? io_counters(int pid) {
         String path = string::tformat("/proc/%d/io", pid);
         File file   = file::open(path, "r")!;
         defer (void)file.close();
-        char[4096] buf;
-        sz n           = file.read(&buf)!;
-        String[] lines = ((String)buf[:n]).split(tmem, "\n");
-        foreach (line : lines) {
+
+        while (try line = io::treadline(&file)) {
             String[] split = line.split(tmem, ":");
             if (split.len < 2) continue;
             String key = split[0].trim();
@@ -946,22 +997,28 @@ fn int[]? children(Allocator allocator, int pid, bool recursive) {
         @pool() {
             String path = string::tformat("/proc/%d/stat", p);
             File? file  = file::open(path, "r");
+
             if (catch file) continue;
             defer (void)file.close();
             sz? n = file.read(&buf);
+
             if (catch n) continue;
             String stat     = (String)buf[:n];
             sz end_comm     = stat.rindex_of(")")!;
             String after    = stat[end_comm + 2..];
             String[] fields = split_whitespace(tmem, after);
+
             if (fields.len < 2) continue;
             int ppid = fields[1].to_int()!;
+
             entries.push({ p, ppid });
         };
     }
 
     List{int} result;
     result.init(allocator);
+    defer result.free();
+
     List{int} queue;
     queue.init(tmem);
     queue.push(pid);
@@ -1088,24 +1145,43 @@ fn RLimitEntry[]? rlimits_get(Allocator allocator, int pid) {
         defer (void)file.close();
         List{RLimitEntry} entries;
         entries.init(allocator);
+        defer entries.free();
+
         int i = 0;
         while (try line = io::treadline(&file)) {
             if (i++ == 0 || line.len == 0) continue;
             String[] parts = split_whitespace(tmem, line.trim());
             int pc         = 0;
             String[4] filtered;
+
             foreach (p : parts) {
                 String t = p.trim();
                 if (t.len > 0) filtered[pc++] = t;
                 if (pc == 4) break;
             }
+
             if (pc < 3) continue;
             ulong soft = filtered[1] == "unlimited" ? ulong::max : (filtered[1].to_ulong() ?? 0);
             ulong hard = filtered[2] == "unlimited" ? ulong::max : (filtered[2].to_ulong() ?? 0);
-            entries.push({ .name = filtered[0].copy(allocator), .limit = { .soft = soft, .hard = hard } });
+
+            entries.push(
+                { .name = filtered[0].copy(allocator), .limit = { .soft = soft, .hard = hard } }
+            );
         }
+
         return entries.to_array(allocator);
     };
+}
+
+fn void RLimitEntry[].free(self, Allocator allocator) {
+    foreach (re : self) {
+        re.free(allocator);
+    }
+    mem::alloc::free(allocator, self);
+}
+
+fn void RLimitEntry.free(self, Allocator allocator) {
+    mem::alloc::free(allocator, self.name);
 }
 
 <*
@@ -1118,6 +1194,7 @@ fn ThreadInfo[]? threads(Allocator allocator, int pid) {
 
         List{ThreadInfo} ti;
         ti.init(allocator);
+        defer ti.free();
 
         foreach (l : list) {
             if (try int tid = l.basename().to_int()) {
@@ -1140,10 +1217,16 @@ fn ThreadInfo[]? threads(Allocator allocator, int pid) {
     };
 }
 
+fn void ThreadInfo[].free(self, Allocator allocator) {
+    mem::alloc::free(allocator, self);
+}
+
 fn Process[]? all_processes(Allocator allocator) {
     int[] pids = list_pids(tmem)!;
     List{Process} result;
     result.init(allocator);
+    defer result.free();
+
     foreach (pid : pids) {
         if (try Process p = get_proc(allocator, pid)) {
             result.push(p);
@@ -1159,9 +1242,15 @@ fn Process[]? find_by_name(Allocator allocator, String name) {
     int[] pids = list_pids(tmem)!;
     List{Process} result;
     result.init(allocator);
+    defer result.free();
+
     foreach (pid : pids) {
         if (try Process p = get_proc(allocator, pid)) {
-            if (p.name == name) result.push(p);
+            if (p.name == name) {
+                result.push(p);
+            } else {
+                p.free(allocator);
+            }
         }
     }
     return result.to_array(allocator);
