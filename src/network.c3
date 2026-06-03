@@ -142,6 +142,20 @@ fn Connection[]? net_connections(Allocator allocator, Protocol[] protos = ALL_PR
     return out.to_array(allocator);
 }
 
+macro void? NetConnPoller.@poll(&self; @body(conns))
+{
+    @pool() {
+        self.list.clear();
+        for (usz i = 0; i < self.count; i++) {
+            self.files[i].seek(0, FROM_START)!;
+            read_system_connections(
+                tmem, self.protos[i],
+                &self.files[i], &self.list)!;
+        }
+        @body(self.list.array_view());
+    };
+}
+
 fn NetConnPoller? net_conn_poller_new(Allocator allocator, Protocol[] protos = ALL_PROTOCOLS) {
     NetConnPoller p;
     p.allocator = allocator;
@@ -160,23 +174,9 @@ fn void NetConnPoller.close(&self) {
     for (usz i = 0; i < self.count; i++) {
         (void)self.files[i].close();
     }
-    foreach (e : self.list) {
-        e.free(self.allocator);
-    }
-
     self.list.free();
 }
 
-fn Connection[]? NetConnPoller.poll(&self) {
-    @pool() {
-        self.list.clear();
-        for (usz i = 0; i < self.count; i++) {
-            self.files[i].seek(0, FROM_START)!;
-            read_system_connections(self.allocator, self.protos[i], &self.files[i], &self.list)!;
-        }
-        return self.list.array_view();
-    };
-}
 
 fn NetIoCounters[]? net_io_counters(Allocator allocator) {
     List{NetIoCounters} list;
@@ -189,12 +189,8 @@ fn NetIoCounters[]? net_io_counters(Allocator allocator) {
     };
 }
 
-fn void NetIoCounters[].free(self, Allocator allocator) {
-    foreach (ni : self) ni.free(allocator);
-    mem::alloc::free(allocator, self);
-}
-
-fn void NetIoCounters.free(self, Allocator allocator) => mem::alloc::free(allocator, self.name);
+fn void NetIoCounters[].free(self, Allocator allocator) => free_slice(self, allocator);
+fn void NetIoCounters.free(self, Allocator allocator) => free_fields(self, allocator);
 
 fn void? read_system_connections(
     Allocator allocator,
@@ -312,16 +308,8 @@ fn NetIfAddr[]? net_if_addrs(Allocator allocator) {
     return list.to_array(allocator);
 }
 
-fn void NetIfAddr[].free(self, Allocator allocator) {
-	foreach (ni: self) ni.free(allocator);
-	mem::alloc::free(allocator, self);	
-}
-
-fn void NetIfAddr.free(self, Allocator allocator) {
-	mem::alloc::free(allocator, self.name);
-	mem::alloc::free(allocator, self.address);
-	mem::alloc::free(allocator, self.netmask);
-}
+fn void NetIfAddr[].free(self, Allocator allocator) => free_slice(self, allocator);
+fn void NetIfAddr.free(self, Allocator allocator) => free_fields(self, allocator);
 
 fn NetIfStats[]? net_if_stats(Allocator allocator) {
     @pool() {
@@ -377,9 +365,5 @@ fn NetIfStats[]? net_if_stats(Allocator allocator) {
     };
 }
 
-fn void NetIfStats[].free(self, Allocator allocator) {
-	foreach (ni: self) ni.free(allocator);
-	mem::alloc::free(allocator, self);
-}
-
-fn void NetIfStats.free(self, Allocator allocator) => mem::alloc::free(allocator, self.name);
+fn void NetIfStats[].free(self, Allocator allocator) => free_slice(self, allocator);
+fn void NetIfStats.free(self, Allocator allocator) => free_fields(self, allocator);

@@ -204,11 +204,7 @@ fn ProcessInfo? get_info(Allocator allocator, int pid) {
     return proc;
 }
 
-fn void ProcessInfo.free(self, Allocator allocator) {
-    mem::alloc::free(allocator, self.process.name);
-    mem::alloc::free(allocator, self.exe_path);
-    mem::alloc::free(allocator, self.cmdline);
-}
+fn void ProcessInfo.free(self, Allocator allocator) => free_fields(self, allocator);
 
 fn ProcState proc_state(char c) @private {
     switch (c) {
@@ -268,12 +264,9 @@ fn Process? get_proc(Allocator allocator, int pid) {
     return p;
 }
 
-fn void Process[].free(self, Allocator allocator) {
-    foreach (s : self) s.free(allocator);
-    mem::alloc::free(allocator, self);
-}
+fn void Process[].free(self, Allocator allocator) => free_slice(self, allocator);
 
-fn void Process.free(self, Allocator allocator) => mem::alloc::free(allocator, self.name);
+fn void Process.free(self, Allocator allocator) => free_fields(self, allocator);
 
 <*
  @require pid > 0 : "pid must be positive"
@@ -382,17 +375,9 @@ fn EnvVar[]? environ(Allocator allocator, int pid) {
     return ev.to_array(allocator);
 }
 
-fn void EnvVar[].free(&self, Allocator alloc) {
-    foreach (env : self) {
-        env.free(alloc);
-    }
-    mem::alloc::free(alloc, self);
-}
+fn void EnvVar[].free(self, Allocator allocator) => free_slice(self, allocator);
 
-fn void EnvVar.free(&self, Allocator allocator) {
-    mem::alloc::free(allocator, self.key);
-    mem::alloc::free(allocator, self.value);
-}
+fn void EnvVar.free(self, Allocator allocator) => free_fields(self, allocator);
 
 <*
  @require pid > 0 : "pid must be positive"
@@ -496,19 +481,9 @@ fn MemoryMap[]? maps(Allocator allocator, int pid) {
     return mm.to_array(allocator);
 }
 
-fn void MemoryMap.free(&self, Allocator allocator) {
-    mem::alloc::free(allocator, self.address_range);
-    mem::alloc::free(allocator, self.perms);
-    mem::alloc::free(allocator, self.device);
-    mem::alloc::free(allocator, self.pathname);
-}
+fn void MemoryMap.free(self, Allocator allocator) => free_fields(self, allocator);
 
-fn void MemoryMap[].free(self, Allocator allocator) {
-    foreach (m : self) {
-        m.free(allocator);
-    }
-    defer mem::alloc::free(allocator, self);
-}
+fn void MemoryMap[].free(self, Allocator allocator) => free_slice(self, allocator);
 
 struct FlagInfo {
     int flag;
@@ -591,12 +566,8 @@ fn OpenFile[]? open_files(Allocator allocator, int pid) {
 }
 
 
-fn void OpenFile[].free(self, Allocator allocator) {
-    foreach (of : self) {
-        mem::alloc::free(allocator, of.path);
-        mem::alloc::free(allocator, of.mode);
-    }
-}
+fn void OpenFile[].free(self, Allocator allocator) => free_slice(self, allocator);
+fn void OpenFile.free(self, Allocator allocator) => free_fields(self, allocator);
 
 fn void? read_connections(
     Allocator allocator,
@@ -674,15 +645,9 @@ fn Connection[]? connections(Allocator allocator, int pid) {
     return list.to_array(allocator);
 }
 
-fn void Connection[].free(self, Allocator allocator) {
-    foreach (c : self) c.free(allocator);
-    mem::alloc::free(allocator, self);
-}
+fn void Connection[].free(self, Allocator allocator) => free_slice(self, allocator);
 
-fn void Connection.free(self, Allocator allocator) {
-    mem::alloc::free(allocator, self.local_addr);
-    mem::alloc::free(allocator, self.remote_addr);
-}
+fn void Connection.free(self, Allocator allocator) => free_fields(self, allocator);
 
 macro ulong boot_time() {
     static ulong cached = 0;
@@ -1173,16 +1138,9 @@ fn RLimitEntry[]? rlimits_get(Allocator allocator, int pid) {
     };
 }
 
-fn void RLimitEntry[].free(self, Allocator allocator) {
-    foreach (re : self) {
-        re.free(allocator);
-    }
-    mem::alloc::free(allocator, self);
-}
+fn void RLimitEntry[].free(self, Allocator allocator) => free_slice(self, allocator);
 
-fn void RLimitEntry.free(self, Allocator allocator) {
-    mem::alloc::free(allocator, self.name);
-}
+fn void RLimitEntry.free(self, Allocator allocator) => free_fields(self, allocator);
 
 <*
  @require pid > 0 : "pid must be positive"
@@ -1215,10 +1173,6 @@ fn ThreadInfo[]? threads(Allocator allocator, int pid) {
         }
         return ti.to_array(allocator);
     };
-}
-
-fn void ThreadInfo[].free(self, Allocator allocator) {
-    mem::alloc::free(allocator, self);
 }
 
 fn Process[]? all_processes(Allocator allocator) {

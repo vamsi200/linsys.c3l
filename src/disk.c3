@@ -93,15 +93,11 @@ fn DiskPartition[]? disk_partitions(Allocator allocator) {
 }
 
 fn void DiskPartition[].free(self, Allocator allocator) {
-    foreach (dp : self) dp.free(allocator);
-    mem::alloc::free(allocator, self);
+	free_slice(self, allocator);
 }
 
 fn void DiskPartition.free(self, Allocator allocator) {
-    mem::alloc::free(allocator, self.device);
-    mem::alloc::free(allocator, self.mountpoint);
-    mem::alloc::free(allocator, self.filesystem);
-    mem::alloc::free(allocator, self.options);
+	free_fields(self, allocator);
 }
 
 <*
@@ -133,6 +129,7 @@ fn void DiskContext.init(&self, Allocator allocator) {
     self.allocator = allocator;
     self.sector_size_cache.init(allocator);
     if (catch err = self.cache_mutex.init()) {
+        self.sector_size_cache.free();
         io::printfn("mutex init failed: %s", err);
         unreachable();
     }
@@ -207,12 +204,11 @@ fn DiskIoCounters[]? disk_io_counters(Allocator allocator, DiskContext* ctx) {
 }
 
 fn void DiskIoCounters[].free(self, Allocator allocator) {
-    foreach (di : self) di.free(allocator);
-    mem::alloc::free(allocator, self);
+	free_slice(self, allocator);
 }
 
 fn void DiskIoCounters.free(self, Allocator allocator) {
-    mem::alloc::free(allocator, self.name);
+	free_fields(self, allocator);
 }
 
 <*
@@ -253,40 +249,41 @@ fn DiskIoPoller? disk_io_poller_new(Allocator allocator, DiskContext* ctx) {
 
 fn void DiskIoPoller.close(&self) {
     (void)self.file.close();
-    foreach (d : self.list.array_view()) {
-        d.free(self.allocator);
-    }
     self.list.free();
 }
 
-fn DiskIoCounters[]? DiskIoPoller.poll(&self) {
+macro void? DiskIoPoller.@poll(&self; @body(dio)) {
     @pool() {
         self.file.seek(0, FROM_START)!;
         self.list.clear();
         while (try line = io::treadline(&self.file)) {
             if (line.len == 0) continue;
             String[] fields = split_whitespace(tmem, line.trim());
-            if (try disk = parse_disk_line(self.allocator, fields, self.ctx)) {
+            if (try disk = parse_disk_line(tmem, fields, self.ctx)) {
                 self.list.push(disk);
             }
         }
-        return self.list.array_view();
+        @body(self.list.array_view());
     };
 }
 
 <*
  @require device.len > 0 : "device name must not be empty"
 *>
-fn DiskIoCounters? DiskIoPoller.poll_perdisk(&self, String device) {
+macro void? DiskIoPoller.@poll_perdisk(&self, String device; @body(dio)) {
     @pool() {
         self.file.seek(0, FROM_START)!;
+        bool found = false;
         while (try line = io::treadline(&self.file)) {
             if (line.len == 0) continue;
             String[] fields = split_whitespace(tmem, line.trim());
             if (fields.len < DISKSTATS_MIN_FIELDS) continue;
             if (fields[2] != device) continue;
-            return parse_disk_line(self.allocator, fields, self.ctx);
+            found = true;
+            if (try dio = parse_disk_line(tmem, fields, self.ctx)) {
+                @body(dio);
+            }
+            if (!found) return NOT_FOUND~;
         }
     };
-    return NOT_FOUND~;
 }

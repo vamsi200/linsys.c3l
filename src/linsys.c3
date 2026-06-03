@@ -7,6 +7,20 @@ faultdef
     NO_SUCH_PROCESS, PERMISSION_DENIED, PARSE_ERROR, NOT_SUPPORTED, PROCESS_EXITED, IO_ERROR, SCHED_NO_SUCH_PROCESS, SCHED_PERMISSION_DENIED, SCHED_INVALID, NICE_PERMISSION_DENIED, NICE_NO_SUCH_PROCESS, NICE_INVALID, UNKNOWN, NOT_FOUND
 ;
 
+macro void free_slice(slice, Allocator allocator) {
+    $assert $defined(slice[0].free(allocator)) : "element type must have .free(Allocator)";
+    foreach (item : slice) item.free(allocator);
+    mem::alloc::free(allocator, slice);
+}
+
+macro void free_fields(self, Allocator allocator) {
+    $foreach $field : $Typeof(self)::members:
+        $if $field.type.name == "String":
+            mem::alloc::free(allocator, self.$eval($field.name));
+        $endif
+    $endforeach
+}
+
 fn TcpState tcp_state(String hex) {
     switch (hex) {
         case "01": return TcpState.ESTABLISHED;

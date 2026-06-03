@@ -484,16 +484,9 @@ fn CpuInfo[]? cpu_info(Allocator allocator) {
     };
 }
 
-fn void CpuInfo[].free(self, Allocator allocator) {
-	foreach (ci: self) ci.free(allocator);
-	mem::alloc::free(allocator, self);
-}
+fn void CpuInfo[].free(self, Allocator allocator) => free_slice(self, allocator);
 
-fn void CpuInfo.free(self, Allocator allocator) {
-	mem::alloc::free(allocator, self.vendor);
-	mem::alloc::free(allocator, self.model);
-	mem::alloc::free(allocator, self.flags);
-}
+fn void CpuInfo.free(self, Allocator allocator) => free_fields(self, allocator);
 
 fn CpuTemp[]? cpu_temps(Allocator allocator) {
     @pool() {
@@ -535,12 +528,9 @@ fn CpuTemp[]? cpu_temps(Allocator allocator) {
     };
 }
 
-fn void CpuTemp[].free(self, Allocator allocator) {
-	foreach (ct: self) ct.free(allocator);
-	mem::alloc::free(allocator, self);
-}
+fn void CpuTemp[].free(self, Allocator allocator) => free_slice(self, allocator);
 
-fn void CpuTemp.free(self, Allocator allocator) => mem::alloc::free(allocator, self.sensor);
+fn void CpuTemp.free(self, Allocator allocator) => free_fields(self, allocator);
 
 fn CpuUsage cpu_usage(SystemCpuTimes old, SystemCpuTimes new) {
     double old_total = old.user + old.nice + old.system + old.idle + old.iowait + old.irq + old.softirq + old.steal;
