@@ -13,7 +13,7 @@
   "dependencies": [],
   // Authors, optionally with email.
   "authors": [
-    "Vamshi V <vamsivanama891@gmail.com>"
+    "Vamsi V <contact.vamshi99@gmail.com>"
   ],
   // Version using semantic versioning.
   "version": "0.1.0",
@@ -39,7 +39,7 @@
   // "target": "windows-x64",
   // Targets.
   "targets": {
-    "c3sys": {
+    "linsys": {
       // Executable or library.
       "type": "executable",
       // Additional libraries, sources

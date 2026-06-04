@@ -71,6 +71,7 @@ fn void? parse_sensor_temperatures(
     foreach (p : paths) {
         ulong? raw = read_ulong_file(p.input);
         if (catch raw) continue;
+
         double current  = (double)raw / 1000.0;
         double critical = 0.0;
         ulong? crit_raw = read_ulong_file(p.crit);

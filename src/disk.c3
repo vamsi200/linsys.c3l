@@ -61,19 +61,16 @@ fn DiskPartition[]? disk_partitions(Allocator allocator) {
         File file = file::open("/proc/mounts", "r")!;
         defer (void)file.close();
 
-        String content = read_file(tmem, file)!;
-
         List{DiskPartition} parts;
         parts.init(allocator);
         defer parts.free();
 
-        foreach (line : content.split(tmem, "\n")) {
+        while (try line = io::treadline(&file)) {
             if (line.len == 0) {
                 continue;
             }
 
             String[] fields = split_whitespace(tmem, line);
-
             if (fields.len < 4) {
                 continue;
             }
@@ -92,13 +89,8 @@ fn DiskPartition[]? disk_partitions(Allocator allocator) {
     };
 }
 
-fn void DiskPartition[].free(self, Allocator allocator) {
-	free_slice(self, allocator);
-}
-
-fn void DiskPartition.free(self, Allocator allocator) {
-	free_fields(self, allocator);
-}
+fn void DiskPartition[].free(self, Allocator allocator) => free_slice(self, allocator);
+fn void DiskPartition.free(self, Allocator allocator) => free_fields(self, allocator);
 
 <*
  @require path.len > 0 : "path must not be empty"
@@ -128,6 +120,7 @@ fn DiskUsage? disk_usage(String path) {
 fn void DiskContext.init(&self, Allocator allocator) {
     self.allocator = allocator;
     self.sector_size_cache.init(allocator);
+
     if (catch err = self.cache_mutex.init()) {
         self.sector_size_cache.free();
         io::printfn("mutex init failed: %s", err);
@@ -142,6 +135,7 @@ fn void DiskContext.free(&self) {
 
 fn ulong DiskContext.get_sector_size(&self, String device) {
     self.cache_mutex.lock();
+
     if (try ulong size = self.sector_size_cache.get(device)) {
         self.cache_mutex.unlock();
         return size;
@@ -151,9 +145,9 @@ fn ulong DiskContext.get_sector_size(&self, String device) {
     @pool() {
         String sector_path = string::tformat("/sys/block/%s/queue/physical_block_size", device);
         ulong size         = read_ulong_file(sector_path) ?? 512;
-
         self.cache_mutex.lock();
         defer self.cache_mutex.unlock();
+
         if (try ulong existing = self.sector_size_cache.get(device)) return existing;
         self.sector_size_cache.set(device, size);
         return size;
@@ -203,13 +197,8 @@ fn DiskIoCounters[]? disk_io_counters(Allocator allocator, DiskContext* ctx) {
     };
 }
 
-fn void DiskIoCounters[].free(self, Allocator allocator) {
-	free_slice(self, allocator);
-}
-
-fn void DiskIoCounters.free(self, Allocator allocator) {
-	free_fields(self, allocator);
-}
+fn void DiskIoCounters[].free(self, Allocator allocator) => free_slice(self, allocator);
+fn void DiskIoCounters.free(self, Allocator allocator) => free_fields(self, allocator);
 
 <*
  @require device.len > 0 : "device name must not be empty"
@@ -218,6 +207,7 @@ fn DiskIoCounters? disk_io_counters_perdisk(Allocator allocator, String device, 
     @pool() {
         File file = file::open("/proc/diskstats", "r")!;
         defer (void)file.close();
+
         while (try line = io::treadline(&file)) {
             if (line.len == 0) continue;
             String[] fields = split_whitespace(tmem, line.trim());
@@ -226,6 +216,7 @@ fn DiskIoCounters? disk_io_counters_perdisk(Allocator allocator, String device, 
             return parse_disk_line(allocator, fields, ctx);
         }
     };
+
     return NOT_FOUND~;
 }
 

@@ -77,7 +77,6 @@ fn SystemCpuTimes? sys_cpu_times() {
     File file = file::open("/proc/stat", "r")!;
     defer (void)file.close();
     String content = read_file(tmem, file)!;
-    sz? newline    = content.index_of_char('\n');
 
     String line;
     if (try sz nl = content.index_of_char('\n')) {
@@ -87,32 +86,29 @@ fn SystemCpuTimes? sys_cpu_times() {
     }
 
     String[] raw = split_whitespace(tmem, line);
-    usz n        = 0;
-    foreach (f : raw) {
-        if (f.len > 0) raw[n++] = f;
-    }
 
-    if (n < 11) return PARSE_ERROR~;
     return {
-        .user = raw[1].to_ulong() ?? 0,
-        .nice = raw[2].to_ulong() ?? 0,
-        .system = raw[3].to_ulong() ?? 0,
-        .idle = raw[4].to_ulong() ?? 0,
-        .iowait = raw[5].to_ulong() ?? 0,
-        .irq = raw[6].to_ulong() ?? 0,
-        .softirq = raw[7].to_ulong() ?? 0,
-        .steal = raw[8].to_ulong() ?? 0,
-        .guest = raw[9].to_ulong() ?? 0,
-        .guest_nice = raw[10].to_ulong() ?? 0,
+        .user = raw.len > 1 ? (raw[1].to_ulong() ?? 0) : 0,
+        .nice = raw.len > 2 ? (raw[2].to_ulong() ?? 0) : 0,
+        .system = raw.len > 3 ? (raw[3].to_ulong() ?? 0) : 0,
+        .idle = raw.len > 4 ? (raw[4].to_ulong() ?? 0) : 0,
+        .iowait = raw.len > 5 ? (raw[5].to_ulong() ?? 0) : 0,
+        .irq = raw.len > 6 ? (raw[6].to_ulong() ?? 0) : 0,
+        .softirq = raw.len > 7 ? (raw[7].to_ulong() ?? 0) : 0,
+        .steal = raw.len > 8 ? (raw[8].to_ulong() ?? 0) : 0,
+        .guest = raw.len > 9 ? (raw[9].to_ulong() ?? 0) : 0,
+        .guest_nice = raw.len > 10 ? (raw[10].to_ulong() ?? 0) : 0,
     };
 }
 
-fn SystemCpuTimes[]? cpu_times_percpu(Allocator allocator) {
+fn SystemCpuTimes[]? sys_cpu_times_percpu(Allocator allocator) {
     File file = file::open("/proc/stat", "r")!;
     defer (void)file.close();
+
     List{SystemCpuTimes} cpus;
     cpus.init(allocator);
-	defer cpus.free();	
+    defer cpus.free();
+
     while (try line = io::treadline(&file)) {
         if (!line.starts_with("cpu")) {
             continue;
@@ -123,27 +119,32 @@ fn SystemCpuTimes[]? cpu_times_percpu(Allocator allocator) {
         }
 
         String[] fields = line.split(tmem, " ");
+
         if (fields.len < 11) {
             continue;
         }
 
         cpus.push(
             {
-                .user = fields[1].to_double() ?? 0,
-                .nice = fields[2].to_double() ?? 0,
-                .system = fields[3].to_double() ?? 0,
-                .idle = fields[4].to_double() ?? 0,
-                .iowait = fields[5].to_double() ?? 0,
-                .irq = fields[6].to_double() ?? 0,
-                .softirq = fields[7].to_double() ?? 0,
-                .steal = fields[8].to_double() ?? 0,
-                .guest = fields[9].to_double() ?? 0,
-                .guest_nice = fields[10].to_double() ?? 0,
+                .user = fields.len > 1 ? (fields[1].to_ulong() ?? 0) : 0,
+                .nice = fields.len > 2 ? (fields[2].to_ulong() ?? 0) : 0,
+                .system = fields.len > 3 ? (fields[3].to_ulong() ?? 0) : 0,
+                .idle = fields.len > 4 ? (fields[4].to_ulong() ?? 0) : 0,
+                .iowait = fields.len > 5 ? (fields[5].to_ulong() ?? 0) : 0,
+                .irq = fields.len > 6 ? (fields[6].to_ulong() ?? 0) : 0,
+                .softirq = fields.len > 7 ? (fields[7].to_ulong() ?? 0) : 0,
+                .steal = fields.len > 8 ? (fields[8].to_ulong() ?? 0) : 0,
+                .guest = fields.len > 9 ? (fields[9].to_ulong() ?? 0) : 0,
+                .guest_nice = fields.len > 10 ? (fields[10].to_ulong() ?? 0) : 0,
             }
         );
     }
+
     return cpus.to_array(allocator);
 }
+
+fn void SystemCpuTimes[].free(self, Allocator allocator) => free_slice(self, allocator);
+fn void SystemCpuTimes.free(self, Allocator allocator) => free_fields(self, allocator);
 
 fn SystemCpuSnapshot? sys_cpu_snapshot() {
     File file = file::open("/proc/stat", "r")!;
@@ -154,23 +155,19 @@ fn SystemCpuSnapshot? sys_cpu_snapshot() {
             continue;
         }
 
-        String[] fields = line.split(tmem, " ");
-
-        if (fields.len < 5) {
-            return PARSE_ERROR~;
-        }
+        String[] fields = split_whitespace(tmem, line);
 
         ulong total = 0;
+        ulong idle  = 0;
+
         foreach (field : fields[1..]) {
             total += field.to_ulong() ?? 0;
         }
 
-        ulong idle = fields[4].to_ulong() ?? 0;
+        if (fields.len > 4) idle = fields[4].to_ulong() ?? 0;
 
         // io_wait also included..
-        if (fields.len > 5) {
-            idle += fields[5].to_ulong() ?? 0;
-        }
+        if (fields.len > 5) idle += fields[5].to_ulong() ?? 0;
 
         return { .total = total, .idle = idle, };
     }
@@ -178,34 +175,39 @@ fn SystemCpuSnapshot? sys_cpu_snapshot() {
     return PARSE_ERROR~;
 }
 
-fn SystemCpuSnapshot[]? cpu_snapshot_percpu(Allocator allocator) {
+fn SystemCpuSnapshot[]? sys_cpu_snapshot_percpu(Allocator allocator) {
     File file = file::open("/proc/stat", "r")!;
     defer (void)file.close();
     List{SystemCpuSnapshot} cs;
     cs.init(allocator);
-	defer cs.free();
+    defer cs.free();
 
     ulong total = 0;
     ulong idle  = 0;
+
     while (try line = io::treadline(&file)) {
         if (!line.starts_with("cpu")) continue;
 
         if (line.starts_with("cpu ")) continue;
 
         String[] fields = split_whitespace(tmem, line);
-        if (fields.len < 5) return PARSE_ERROR~;
 
         foreach (field : fields[1..]) {
             total += field.to_ulong() ?? 0;
         }
 
-        idle = fields[4].to_ulong() ?? 0;
+        if (fields.len > 4) idle = fields[4].to_ulong() ?? 0;
+
         if (fields.len > 5) idle += fields[5].to_ulong() ?? 0;
 
         cs.push({ .total = total, .idle = idle });
     }
+
     return cs.to_array(allocator);
 }
+
+fn void SystemCpuSnapshot[].free(self, Allocator allocator) => free_slice(self, allocator);
+fn void SystemCpuSnapshot.free(self, Allocator allocator) => free_fields(self, allocator);
 
 fn double sys_cpu_percent(SystemCpuSnapshot old, SystemCpuSnapshot new) {
     ulong total_delta = new.total - old.total;
@@ -221,11 +223,11 @@ fn double sys_cpu_percent(SystemCpuSnapshot old, SystemCpuSnapshot new) {
 <*
  @require new.len == old.len : "snapshot arrays must be same length"
 *>
-fn double[]? sys_cpu_percent_percpu(Allocator allocator, SystemCpuSnapshot[] old, SystemCpuSnapshot[] new) {
-    if (old.len != new.len) {
-        return PARSE_ERROR~;
-    }
-
+fn double[]? sys_cpu_percent_percpu(
+    Allocator allocator,
+    SystemCpuSnapshot[] old,
+    SystemCpuSnapshot[] new
+) {
     double[] out = mem::alloc::alloc_array(allocator, double, old.len);
 
     foreach (i, o : old) {
@@ -253,7 +255,7 @@ fn CpuCount? cpu_count() {
 
         List{int} physical_ids;
         physical_ids.init(tmem);
-	defer physical_ids.free();
+        defer physical_ids.free();
 
         while (try line = io::treadline(&file)) {
             if (line.starts_with("processor")) {
@@ -289,6 +291,9 @@ fn CpuCount? cpu_count() {
         return { .logical = logical, .physical = (int)physical_ids.len(), };
     };
 }
+
+fn void CpuFreq[].free(self, Allocator allocator) => free_slice(self, allocator);
+fn void CpuFreq.free(self, Allocator allocator) => free_fields(self, allocator);
 
 fn CpuFreq? cpu_freq() {
     @pool() {
@@ -326,7 +331,7 @@ fn CpuFreq[]? cpu_freq_percpu(Allocator allocator) {
 
         List{CpuFreq} freqs;
         freqs.init(allocator);
-	defer freqs.free();
+        defer freqs.free();
 
         foreach (entry : list) {
             String name = entry.file_tbasename()!;
@@ -361,7 +366,8 @@ fn CpuFreq[]? cpu_freq_percpu(Allocator allocator) {
 
                 freqs.push({ .current = (cur_content.trim()
                     .to_ulong() ?? 0) / 1000.0, .min = (min_content.trim()
-                        .to_ulong() ?? 0) / 1000.0, .max = (max_content.trim().to_ulong() ?? 0) / 1000.0, });
+                        .to_ulong() ?? 0) / 1000.0, .max = (max_content.trim()
+                            .to_ulong() ?? 0) / 1000.0, });
             }
         }
 
@@ -406,25 +412,27 @@ fn CpuStats? cpu_stats() {
 }
 
 
-fn LoadAvg? loadavg() {
+fn LoadAvg? load_avg() {
     @pool() {
         File file = file::open("/proc/loadavg", "r")!;
         defer (void)file.close();
 
-        String content = read_file(tmem, file)!;
+        while (try line = io::treadline(&file)) {
+            String[] fields = split_whitespace(tmem, line);
 
-        String[] fields = split_whitespace(tmem, content);
+            if (fields.len < 3) {
+                return PARSE_ERROR~;
+            }
 
-        if (fields.len < 3) {
-            return PARSE_ERROR~;
+            return {
+                .one = fields[0].to_double() ?? 0,
+                .five = fields[1].to_double() ?? 0,
+                .fifteen = fields[2].to_double() ?? 0,
+            };
         }
-
-        return {
-            .one = fields[0].to_double() ?? 0,
-            .five = fields[1].to_double() ?? 0,
-            .fifteen = fields[2].to_double() ?? 0,
-        };
     };
+
+    return UNKNOWN~;
 }
 
 fn CpuInfo[]? cpu_info(Allocator allocator) {
@@ -433,7 +441,7 @@ fn CpuInfo[]? cpu_info(Allocator allocator) {
         defer (void)file.close();
         List{CpuInfo} infos;
         infos.init(allocator);
-	defer infos.free();
+        defer infos.free();
         CpuInfo current = { };
 
         while (try line = io::treadline(&file)) {
@@ -485,7 +493,6 @@ fn CpuInfo[]? cpu_info(Allocator allocator) {
 }
 
 fn void CpuInfo[].free(self, Allocator allocator) => free_slice(self, allocator);
-
 fn void CpuInfo.free(self, Allocator allocator) => free_fields(self, allocator);
 
 fn CpuTemp[]? cpu_temps(Allocator allocator) {
@@ -496,7 +503,7 @@ fn CpuTemp[]? cpu_temps(Allocator allocator) {
 
         List{CpuTemp} temps;
         temps.init(allocator);
-	defer temps.free();
+        defer temps.free();
 
         foreach (entry : list) {
             String name = entry.file_tbasename()!;
@@ -529,13 +536,16 @@ fn CpuTemp[]? cpu_temps(Allocator allocator) {
 }
 
 fn void CpuTemp[].free(self, Allocator allocator) => free_slice(self, allocator);
-
 fn void CpuTemp.free(self, Allocator allocator) => free_fields(self, allocator);
 
 fn CpuUsage cpu_usage(SystemCpuTimes old, SystemCpuTimes new) {
-    double old_total = old.user + old.nice + old.system + old.idle + old.iowait + old.irq + old.softirq + old.steal;
+    double old_total = old.user + old.nice + old.system + old.idle + old.iowait + old.irq
+        + old.softirq
+        + old.steal;
 
-    double new_total = new.user + new.nice + new.system + new.idle + new.iowait + new.irq + new.softirq + new.steal;
+    double new_total = new.user + new.nice + new.system + new.idle + new.iowait + new.irq
+        + new.softirq
+        + new.steal;
 
     double total_delta = new_total - old_total;
 

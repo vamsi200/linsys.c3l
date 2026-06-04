@@ -265,7 +265,6 @@ fn Process? get_proc(Allocator allocator, int pid) {
 }
 
 fn void Process[].free(self, Allocator allocator) => free_slice(self, allocator);
-
 fn void Process.free(self, Allocator allocator) => free_fields(self, allocator);
 
 <*
@@ -376,7 +375,6 @@ fn EnvVar[]? environ(Allocator allocator, int pid) {
 }
 
 fn void EnvVar[].free(self, Allocator allocator) => free_slice(self, allocator);
-
 fn void EnvVar.free(self, Allocator allocator) => free_fields(self, allocator);
 
 <*
@@ -482,7 +480,6 @@ fn MemoryMap[]? maps(Allocator allocator, int pid) {
 }
 
 fn void MemoryMap.free(self, Allocator allocator) => free_fields(self, allocator);
-
 fn void MemoryMap[].free(self, Allocator allocator) => free_slice(self, allocator);
 
 struct FlagInfo {
@@ -534,6 +531,7 @@ fn OpenFile[]? open_files(Allocator allocator, int pid) {
 
     @pool() {
         int[] fd_list = fds(tmem, pid)!;
+
         foreach (fd : fd_list) {
             String fd_path = string::tformat("/proc/%d/fd/%d", pid, fd);
             if (!os::native_file_or_dir_exists(fd_path)) continue;
@@ -547,15 +545,19 @@ fn OpenFile[]? open_files(Allocator allocator, int pid) {
                 String info_path = string::tformat("/proc/%d/fdinfo/%d", pid, fd);
                 File file        = file::open(info_path, "r")!;
                 defer (void)file.close();
+
                 while (try line = io::treadline(&file)) {
                     line = line.trim();
                     if (!line.starts_with("flags:")) continue;
                     String flags_str = line["flags:".len..].trim();
+
                     if (try int flags = flags_str.to_int(8)) {
                         entry.mode = flags_to_mode(flags, allocator);
                     }
+
                     break;
                 }
+
                 of.push(entry);
             }
         }
@@ -646,7 +648,6 @@ fn Connection[]? connections(Allocator allocator, int pid) {
 }
 
 fn void Connection[].free(self, Allocator allocator) => free_slice(self, allocator);
-
 fn void Connection.free(self, Allocator allocator) => free_fields(self, allocator);
 
 macro ulong boot_time() {
@@ -720,6 +721,7 @@ fn double? create_time(int pid) {
         ulong clk   = clktck();
         start_time = (double)btime + ((double)val / (double)clk);
     }
+
     return start_time;
 }
 
@@ -732,6 +734,7 @@ fn String[]? parse_proc_stat_fields(Allocator allocator, String raw) @private {
 
     List{String} fields;
     fields.init(allocator);
+    defer fields.free();
 
     foreach (f : raw_fields) {
         if (f.len > 0) {
@@ -905,6 +908,7 @@ fn IoCounters? io_counters(int pid) {
             if (split.len < 2) continue;
             String key = split[0].trim();
             ulong v    = split[1].trim().to_ulong() ?? 0;
+
             switch (key) {
                 case "rchar": ioc.read_count = v;
                 case "wchar": ioc.write_count = v;
@@ -1139,7 +1143,6 @@ fn RLimitEntry[]? rlimits_get(Allocator allocator, int pid) {
 }
 
 fn void RLimitEntry[].free(self, Allocator allocator) => free_slice(self, allocator);
-
 fn void RLimitEntry.free(self, Allocator allocator) => free_fields(self, allocator);
 
 <*

@@ -87,18 +87,16 @@ fn NetIoCounters? parse_net_io_line(Allocator allocator, String line) @private {
 
     String[] fields = split_whitespace(tmem, line[idx + 1..].trim());
 
-    if (fields.len < 16) return PARSE_ERROR~;
-
     return {
         .name = iface.copy(allocator),
-        .bytes_recv = fields[0].to_ulong() ?? 0,
-        .packets_recv = fields[1].to_ulong() ?? 0,
-        .errin = fields[2].to_ulong() ?? 0,
-        .dropin = fields[3].to_ulong() ?? 0,
-        .bytes_sent = fields[8].to_ulong() ?? 0,
-        .packets_sent = fields[9].to_ulong() ?? 0,
-        .errout = fields[10].to_ulong() ?? 0,
-        .dropout = fields[11].to_ulong() ?? 0,
+        .bytes_recv = fields.len > 0 ? (fields[0].to_ulong() ?? 0) : 0,
+        .packets_recv = fields.len > 1 ? (fields[1].to_ulong() ?? 0) : 0,
+        .errin = fields.len > 2 ? (fields[2].to_ulong() ?? 0) : 0,
+        .dropin = fields.len > 3 ? (fields[3].to_ulong() ?? 0) : 0,
+        .bytes_sent = fields.len > 8 ? (fields[8].to_ulong() ?? 0) : 0,
+        .packets_sent = fields.len > 9 ? (fields[9].to_ulong() ?? 0) : 0,
+        .errout = fields.len > 10 ? (fields[10].to_ulong() ?? 0) : 0,
+        .dropout = fields.len > 11 ? (fields[11].to_ulong() ?? 0) : 0,
     };
 }
 
@@ -142,15 +140,12 @@ fn Connection[]? net_connections(Allocator allocator, Protocol[] protos = ALL_PR
     return out.to_array(allocator);
 }
 
-macro void? NetConnPoller.@poll(&self; @body(conns))
-{
+macro void? NetConnPoller.@poll(&self; @body(conns)) {
     @pool() {
         self.list.clear();
         for (usz i = 0; i < self.count; i++) {
             self.files[i].seek(0, FROM_START)!;
-            read_system_connections(
-                tmem, self.protos[i],
-                &self.files[i], &self.list)!;
+            read_system_connections(tmem, self.protos[i], &self.files[i], &self.list)!;
         }
         @body(self.list.array_view());
     };
@@ -201,10 +196,12 @@ fn void? read_system_connections(
     @pool() {
         bool is_v6 = proto == Protocol.TCP6 || proto == Protocol.UDP6;
         int i      = 0;
+
         while (try line = io::treadline(file)) {
             if (i++ == 0 || line.len == 0) continue;
             String[] fields = split_whitespace(tmem, line.trim());
             if (fields.len < 4) continue;
+
             sz? colon_l = fields[1].index_of_char(':');
             sz? colon_r = fields[2].index_of_char(':');
             if (catch colon_l) continue;
@@ -319,7 +316,7 @@ fn NetIfStats[]? net_if_stats(Allocator allocator) {
 
         List{NetIfStats} stats;
         stats.init(allocator);
-	defer stats.free();
+        defer stats.free();
 
         foreach (entry : list) {
             String? iface = entry.file_tbasename();
