@@ -54,13 +54,12 @@ https://github.com/konimarti/c3l
 ### Process Information
 
 ```c
-module linsys;
-
+import linsys;
 import std::io;
 
 fn int main(String[] args) {
     @pool(){
-        ProcessInfo pi = get_info(tmem, 1) ?? {};
+        ProcessInfo pi = process::get_info(tmem, 1) ?? {};
         io::printn(pi);
     };
     return 0;
@@ -75,13 +74,12 @@ Output:
 ### Memory Statistics
 
 ```c
-module linsys;
-
+import linsys;
 import std::io;
 
 fn int main(String[] args) {
     @pool() {
-        VirtualMemory mem = virtual_memory() ?? {};
+        VirtualMemory mem = memory::virtual_memory() ?? {};
         io::printn(mem);
     };
     return 0;
@@ -97,13 +95,12 @@ Output:
 ### Disk Usage
 
 ```c
-module linsys;
-
+import linsys;
 import std::io;
 
 fn int main(String[] args) {
     @pool() {
-        DiskUsage usage = disk_usage("/") ?? {};
+        DiskUsage usage = disk::disk_usage("/") ?? {};
         io::printn(usage);
     };
     return 0;
