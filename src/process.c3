@@ -1,4 +1,5 @@
-module linsys;
+module linsys::process;
+import linsys @public;
 import std::io;
 import std::io::file;
 import libc;
@@ -204,7 +205,10 @@ fn ProcessInfo? get_info(Allocator allocator, int pid) {
     return proc;
 }
 
-fn void ProcessInfo.free(self, Allocator allocator) => free_fields(self, allocator);
+fn void ProcessInfo.free(self, Allocator allocator) {
+	linsys::free_fields(self, allocator);
+	linsys::free_fields(self.process, allocator);
+}
 
 fn ProcState proc_state(char c) @private {
     switch (c) {
@@ -264,8 +268,8 @@ fn Process? get_proc(Allocator allocator, int pid) {
     return p;
 }
 
-fn void Process[].free(self, Allocator allocator) => free_slice(self, allocator);
-fn void Process.free(self, Allocator allocator) => free_fields(self, allocator);
+fn void Process[].free(self, Allocator allocator) => linsys::free_slice(self, allocator);
+fn void Process.free(self, Allocator allocator) => linsys::free_fields(self, allocator);
 
 <*
  @require pid > 0 : "pid must be positive"
@@ -274,7 +278,7 @@ fn String? read_cmdline(Allocator allocator, int pid) {
     String path = string::tformat("/proc/%d/cmdline", pid);
     File file   = file::open(path, "r")!;
     defer (void)file.close();
-    String content = read_file(tmem, file)!;
+    String content = linsys::read_file(tmem, file)!;
 
     // It is common - there would be no cmdline in many cases.
     if (content.len == 0) return "".copy(allocator);
@@ -293,7 +297,7 @@ fn String? readlink_alloc(Allocator allocator, ZString path) @private {
 
     while (true) {
         sz n = libc::readlink(path, &buf, buf.len);
-        if (n < 0) return IO_ERROR~;
+        if (n < 0) return linsys::IO_ERROR~;
         result.append((String)buf[:n]);
         if (n < buf.len) break;
     }
@@ -305,7 +309,7 @@ fn String? readlink_alloc(Allocator allocator, ZString path) @private {
 *>
 fn String? read_exe(Allocator allocator, int pid) {
     String path = string::tformat("/proc/%d/exe", pid);
-    return readlink_alloc(allocator, path.zstr_tcopy()) ?? PROCESS_EXITED~;
+    return readlink_alloc(allocator, path.zstr_tcopy()) ?? linsys::PROCESS_EXITED~;
 }
 
 fn int[]? list_pids(Allocator allocator) {
@@ -342,9 +346,9 @@ fn String? cwd(Allocator allocator, int pid) {
     if (catch result) {
         switch (libc::errno()) {
             case EACCES:
-            case EPERM: return PERMISSION_DENIED~;
-            case ENOENT: return PROCESS_EXITED~;
-            default: return IO_ERROR~;
+            case EPERM: return linsys::PERMISSION_DENIED~;
+            case ENOENT: return linsys::PROCESS_EXITED~;
+            default: return linsys::IO_ERROR~;
         }
     }
     return result;
@@ -357,7 +361,7 @@ fn EnvVar[]? environ(Allocator allocator, int pid) {
     String path = string::tformat("/proc/%d/environ", pid);
     File file   = file::open(path, "r")!;
     defer (void)file.close();
-    String content = read_file(tmem, file)!;
+    String content = linsys::read_file(tmem, file)!;
     String[] s     = content.split(tmem, "\0");
     List{EnvVar} ev;
     ev.init(allocator);
@@ -374,8 +378,8 @@ fn EnvVar[]? environ(Allocator allocator, int pid) {
     return ev.to_array(allocator);
 }
 
-fn void EnvVar[].free(self, Allocator allocator) => free_slice(self, allocator);
-fn void EnvVar.free(self, Allocator allocator) => free_fields(self, allocator);
+fn void EnvVar[].free(self, Allocator allocator) => linsys::free_slice(self, allocator);
+fn void EnvVar.free(self, Allocator allocator) => linsys::free_fields(self, allocator);
 
 <*
  @require pid > 0 : "pid must be positive"
@@ -386,7 +390,7 @@ fn String? environ_get(Allocator allocator, int pid, String key) {
     File file   = file::open(path, "r")!;
     defer (void)file.close();
 
-    String content = read_file(tmem, file)!;
+    String content = linsys::read_file(tmem, file)!;
 
     foreach (line : content.split(tmem, "\0")) {
         long? idx = line.index_of_char('=');
@@ -395,7 +399,7 @@ fn String? environ_get(Allocator allocator, int pid, String key) {
             return line[idx + 1..].trim().copy(allocator);
         }
     }
-    return NOT_FOUND~;
+    return linsys::NOT_FOUND~;
 }
 
 <*
@@ -454,11 +458,11 @@ fn MemoryMap[]? maps(Allocator allocator, int pid) {
         String p  = string::tformat("/proc/%d/maps", pid);
         File file = file::open(p, "r")!;
         defer (void)file.close();
-        String content = read_file(tmem, file)!;
+        String content = linsys::read_file(tmem, file)!;
 
         foreach (line : content.tsplit("\n")) {
             if (line.len == 0) continue;
-            String[] split = split_whitespace(tmem, line);
+            String[] split = linsys::split_whitespace(tmem, line);
             if (split.len < 5) continue;
 
             MemoryMap entry = {
@@ -479,8 +483,8 @@ fn MemoryMap[]? maps(Allocator allocator, int pid) {
     return mm.to_array(allocator);
 }
 
-fn void MemoryMap.free(self, Allocator allocator) => free_fields(self, allocator);
-fn void MemoryMap[].free(self, Allocator allocator) => free_slice(self, allocator);
+fn void MemoryMap.free(self, Allocator allocator) => linsys::free_fields(self, allocator);
+fn void MemoryMap[].free(self, Allocator allocator) => linsys::free_slice(self, allocator);
 
 struct FlagInfo {
     int flag;
@@ -568,8 +572,8 @@ fn OpenFile[]? open_files(Allocator allocator, int pid) {
 }
 
 
-fn void OpenFile[].free(self, Allocator allocator) => free_slice(self, allocator);
-fn void OpenFile.free(self, Allocator allocator) => free_fields(self, allocator);
+fn void OpenFile[].free(self, Allocator allocator) => linsys::free_slice(self, allocator);
+fn void OpenFile.free(self, Allocator allocator) => linsys::free_fields(self, allocator);
 
 fn void? read_connections(
     Allocator allocator,
@@ -593,12 +597,12 @@ fn void? read_connections(
 
         File file = file::open(path, "r")!;
         defer (void)file.close();
-        String content = read_file(tmem, file)!;
+        String content = linsys::read_file(tmem, file)!;
         bool is_v6     = proto == Protocol.TCP6 || proto == Protocol.UDP6;
 
         foreach (i, line : content.split(tmem, "\n")) {
             if (i == 0 || line.len == 0) continue;
-            String[] raw = split_whitespace(tmem, line.trim());
+            String[] raw = linsys::split_whitespace(tmem, line.trim());
 
             usz n = 0;
             foreach (f : raw) {
@@ -613,17 +617,17 @@ fn void? read_connections(
 
             out.push(
                 {
-                    .local_addr = is_v6 ? ip_to_string_v6(
+                    .local_addr = is_v6 ? linsys::ip_to_string_v6(
                         allocator,
-                        parse_addr6(raw[1][:colon_l])
-                    ) : ip_to_string(allocator, parse_addr(raw[1][:colon_l])),
-                    .remote_addr = is_v6 ? ip_to_string_v6(
+                        linsys::parse_addr6(raw[1][:colon_l])
+                    ) : linsys::ip_to_string(allocator, linsys::parse_addr(raw[1][:colon_l])),
+                    .remote_addr = is_v6 ? linsys::ip_to_string_v6(
                         allocator,
-                        parse_addr6(raw[2][:colon_r])
-                    ) : ip_to_string(allocator, parse_addr(raw[2][:colon_r])),
+                        linsys::parse_addr6(raw[2][:colon_r])
+                    ) : linsys::ip_to_string(allocator, linsys::parse_addr(raw[2][:colon_r])),
                     .local_port = (ushort)(raw[1][colon_l + 1..].to_long(16) ?? 0),
                     .remote_port = (ushort)(raw[2][colon_r + 1..].to_long(16) ?? 0),
-                    .state = tcp_state(raw[3]),
+                    .state = linsys::tcp_state(raw[3]),
                     .protocol = proto,
                 }
             );
@@ -647,8 +651,8 @@ fn Connection[]? connections(Allocator allocator, int pid) {
     return list.to_array(allocator);
 }
 
-fn void Connection[].free(self, Allocator allocator) => free_slice(self, allocator);
-fn void Connection.free(self, Allocator allocator) => free_fields(self, allocator);
+fn void Connection[].free(self, Allocator allocator) => linsys::free_slice(self, allocator);
+fn void Connection.free(self, Allocator allocator) => linsys::free_fields(self, allocator);
 
 macro ulong boot_time() {
     static ulong cached = 0;
@@ -710,12 +714,12 @@ fn double? create_time(int pid) {
     defer (void)file.close();
 
     double start_time;
-    String raw      = read_file(tmem, file)!;
+    String raw      = linsys::read_file(tmem, file)!;
     sz rp           = raw.rindex_of(")")!;
     String after    = raw[(rp + 2)..];
     String[] fields = parse_proc_stat_fields(tmem, raw)!;
 
-    if (fields.len < 20) return PARSE_ERROR~;
+    if (fields.len < 20) return linsys::PARSE_ERROR~;
     if (try ulong val = fields[19].to_ulong()) {
         ulong btime = boot_time();
         ulong clk   = clktck();
@@ -730,7 +734,7 @@ fn String[]? parse_proc_stat_fields(Allocator allocator, String raw) @private {
 
     String after = raw[(rp + 2)..];
 
-    String[] raw_fields = split_whitespace(tmem, after);
+    String[] raw_fields = linsys::split_whitespace(tmem, after);
 
     List{String} fields;
     fields.init(allocator);
@@ -749,7 +753,7 @@ fn CpuTimes? cpu_times_parse(String path) @private {
     CpuTimes cpu = { };
     File file    = file::open(path, "r")!;
     defer (void)file.close();
-    String raw      = read_file(tmem, file)!;
+    String raw      = linsys::read_file(tmem, file)!;
     String[] fields = parse_proc_stat_fields(tmem, raw)!;
 
     if (fields.len > 14) {
@@ -779,6 +783,7 @@ fn CpuTimes? cpu_times_threads(int pid, int tid) {
     return cpu_times_parse(p)!;
 }
 
+// Should I even keep this?
 <*
  @require pid > 0 : "pid must be positive"
 *>
@@ -786,25 +791,16 @@ fn ProcessPoller? process_poller_new(int pid) {
     return { .pid = pid, .last_snapshot = cpu_snapshot(pid)!, };
 }
 
-<*
- @require self.pid > 0 : "pid must be positive"
-*>
 fn double? ProcessPoller.cpu_percent(&self) {
     double pct = cpu_percent_from(self.last_snapshot, self.pid)!;
     self.last_snapshot = cpu_snapshot(self.pid)!;
     return pct;
 }
 
-<*
- @require self.pid > 0 : "pid must be positive"
-*>
 fn double? ProcessPoller.memory_percent(&self) {
     return memory_percent(self.pid);
 }
 
-<*
- @require self.pid > 0 : "pid must be positive"
-*>
 fn IoCounters? ProcessPoller.io_counters(&self) {
     return io_counters(self.pid);
 }
@@ -846,12 +842,12 @@ fn ulong? read_total_cpu_time() {
     File file = file::open("/proc/stat", "r")!;
     defer (void)file.close();
 
-    String line = read_file(tmem, file)!;
+    String line = linsys::read_file(tmem, file)!;
 
     sz i = line.index_of("cpu ")!;
     if (i == -1) return 0;
 
-    String[] split = split_whitespace(tmem, line[(i + 4)..].trim());
+    String[] split = linsys::split_whitespace(tmem, line[(i + 4)..].trim());
 
     if (split.len < 8) return 0;
 
@@ -935,9 +931,9 @@ constdef Signal : int {
 fn void? send_signal(int pid, Signal signal) {
     if (posix::kill(pid, (CInt)signal) == 0) return;
     switch (libc::errno()) {
-        case EPERM: return PERMISSION_DENIED~;
-        case ESRCH: return NO_SUCH_PROCESS~;
-        default: return UNKNOWN~;
+        case EPERM: return linsys::PERMISSION_DENIED~;
+        case ESRCH: return linsys::NO_SUCH_PROCESS~;
+        default: return linsys::UNKNOWN~;
     }
 }
 
@@ -975,7 +971,7 @@ fn int[]? children(Allocator allocator, int pid, bool recursive) {
             String stat     = (String)buf[:n];
             sz end_comm     = stat.rindex_of(")")!;
             String after    = stat[end_comm + 2..];
-            String[] fields = split_whitespace(tmem, after);
+            String[] fields = linsys::split_whitespace(tmem, after);
 
             if (fields.len < 2) continue;
             int ppid = fields[1].to_int()!;
@@ -1028,9 +1024,9 @@ fn int? nice_get(int pid) {
     CInt p = libc::getpriority(libc::PRIO_PROCESS, pid);
     if (libc::errno() != 0) {
         switch (libc::errno()) {
-            case ESRCH: return NICE_NO_SUCH_PROCESS~;
-            case EPERM: return NICE_PERMISSION_DENIED~;
-            default: return NICE_INVALID~;
+            case ESRCH: return linsys::NICE_NO_SUCH_PROCESS~;
+            case EPERM: return linsys::NICE_PERMISSION_DENIED~;
+            default: return linsys::NICE_INVALID~;
         }
     }
     return (int)p;
@@ -1044,9 +1040,9 @@ fn void? nice_set(int pid, int value) {
     value = value < -20 ? -20 : (value > 19 ? 19 : value);
     if (libc::setpriority(libc::PRIO_PROCESS, pid, value) != 0) {
         switch (libc::errno()) {
-            case ESRCH: return NICE_NO_SUCH_PROCESS~;
-            case EPERM: return NICE_PERMISSION_DENIED~;
-            default: return NICE_INVALID~;
+            case ESRCH: return linsys::NICE_NO_SUCH_PROCESS~;
+            case EPERM: return linsys::NICE_PERMISSION_DENIED~;
+            default: return linsys::NICE_INVALID~;
         }
     }
 }
@@ -1065,9 +1061,9 @@ fn int[]? cpu_affinity_get(Allocator allocator, int pid) {
     CpuSet cpu_set = { };
     if (sched_getaffinity((CInt)pid, @sizeof(cpu_set), &cpu_set) != 0) {
         switch (libc::errno()) {
-            case ESRCH: return SCHED_NO_SUCH_PROCESS~;
-            case EPERM: return SCHED_PERMISSION_DENIED~;
-            default: return SCHED_INVALID~;
+            case ESRCH: return linsys::SCHED_NO_SUCH_PROCESS~;
+            case EPERM: return linsys::SCHED_PERMISSION_DENIED~;
+            default: return linsys::SCHED_INVALID~;
         }
     }
 
@@ -1097,9 +1093,9 @@ fn void? cpu_affinity_set(int pid, int[] cpus) {
 
     if (sched_setaffinity((CInt)pid, @sizeof(cpu_set), &cpu_set) != 0) {
         switch (libc::errno()) {
-            case ESRCH: return SCHED_NO_SUCH_PROCESS~;
-            case EPERM: return SCHED_PERMISSION_DENIED~;
-            default: return SCHED_INVALID~;
+            case ESRCH: return linsys::SCHED_NO_SUCH_PROCESS~;
+            case EPERM: return linsys::SCHED_PERMISSION_DENIED~;
+            default: return linsys::SCHED_INVALID~;
         }
     }
 }
@@ -1119,7 +1115,7 @@ fn RLimitEntry[]? rlimits_get(Allocator allocator, int pid) {
         int i = 0;
         while (try line = io::treadline(&file)) {
             if (i++ == 0 || line.len == 0) continue;
-            String[] parts = split_whitespace(tmem, line.trim());
+            String[] parts = linsys::split_whitespace(tmem, line.trim());
             int pc         = 0;
             String[4] filtered;
 
@@ -1142,8 +1138,8 @@ fn RLimitEntry[]? rlimits_get(Allocator allocator, int pid) {
     };
 }
 
-fn void RLimitEntry[].free(self, Allocator allocator) => free_slice(self, allocator);
-fn void RLimitEntry.free(self, Allocator allocator) => free_fields(self, allocator);
+fn void RLimitEntry[].free(self, Allocator allocator) => linsys::free_slice(self, allocator);
+fn void RLimitEntry.free(self, Allocator allocator) => linsys::free_fields(self, allocator);
 
 <*
  @require pid > 0 : "pid must be positive"

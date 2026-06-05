@@ -1,4 +1,5 @@
-module linsys;
+module linsys::sensors;
+import linsys @public;
 import std::io;
 import std::collections::list;
 
@@ -56,12 +57,6 @@ fn BatteryStatus battery_status(String s) @private {
     }
 }
 
-fn ulong? read_ulong_file(String path) @private {
-    File file = file::open(path, "r")!;
-    defer (void)file.close();
-
-    return io::treadline(&file)!.trim().to_ulong();
-}
 
 fn void? parse_sensor_temperatures(
     Allocator allocator,
@@ -69,12 +64,12 @@ fn void? parse_sensor_temperatures(
     List{SensorTemperature}* out
 ) @private {
     foreach (p : paths) {
-        ulong? raw = read_ulong_file(p.input);
+        ulong? raw = linsys::read_ulong_file(p.input);
         if (catch raw) continue;
 
         double current  = (double)raw / 1000.0;
         double critical = 0.0;
-        ulong? crit_raw = read_ulong_file(p.crit);
+        ulong? crit_raw = linsys::read_ulong_file(p.crit);
 
         if (try crit_raw) {
             critical = (double)crit_raw / 1000.0;
@@ -109,7 +104,7 @@ fn SensorPath[]? get_sensor_paths(Allocator allocator) @private {
 
             for (int i = 1; i <= 32; i++) {
                 String input = string::tformat("%s/temp%d_input", base, i);
-                ulong? raw   = read_ulong_file(input);
+                ulong? raw   = linsys::read_ulong_file(input);
                 if (catch raw) continue;
                 paths.push(
                     {
@@ -124,13 +119,13 @@ fn SensorPath[]? get_sensor_paths(Allocator allocator) @private {
     };
 }
 
-fn void SensorPath[].free(self, Allocator allocator) => free_slice(self, allocator);
-fn void SensorPath.free(self, Allocator allocator) => free_fields(self, allocator);
+fn void SensorPath[].free(self, Allocator allocator) => linsys::free_slice(self, allocator);
+fn void SensorPath.free(self, Allocator allocator) => linsys::free_fields(self, allocator);
 
 fn SensorTemperature[]? sensor_temperatures(Allocator allocator) {
     @pool() {
         SensorPath[] paths = get_sensor_paths(allocator)!;
-        free_slice(paths, allocator);
+        linsys::free_slice(paths, allocator);
 
         List{SensorTemperature} out;
         out.init(allocator);
@@ -141,8 +136,8 @@ fn SensorTemperature[]? sensor_temperatures(Allocator allocator) {
     };
 }
 
-fn void SensorTemperature[].free(self, Allocator allocator) => free_slice(self, allocator);
-fn void SensorTemperature.free(self, Allocator allocator) => free_fields(self, allocator);
+fn void SensorTemperature[].free(self, Allocator allocator) => linsys::free_slice(self, allocator);
+fn void SensorTemperature.free(self, Allocator allocator) => linsys::free_fields(self, allocator);
 
 struct SensorPoller {
     SensorPath[] paths;
@@ -157,7 +152,7 @@ fn SensorPoller? sensor_poller_new(Allocator allocator) {
 }
 
 fn void SensorPoller.close(&self) {
-    free_slice(self.paths, self.allocator);
+    linsys::free_slice(self.paths, self.allocator);
     self.list.free();
 }
 
@@ -196,7 +191,7 @@ fn FanPath[]? find_fan_paths(Allocator allocator) @private {
 
             for (int i = 1; i <= 32; i++) {
                 String input = string::tformat("%s/fan%d_input", base, i);
-                ulong? raw   = read_ulong_file(input);
+                ulong? raw   = linsys::read_ulong_file(input);
                 if (catch raw) continue;
                 paths.push(
                     {
@@ -212,18 +207,18 @@ fn FanPath[]? find_fan_paths(Allocator allocator) @private {
 
 fn void? parse_sensor_fans(Allocator allocator, FanPath[] paths, List{SensorFan}* out) @private {
     foreach (p : paths) {
-        ulong? raw = read_ulong_file(p.input);
+        ulong? raw = linsys::read_ulong_file(p.input);
         if (catch raw) continue;
         out.push({ .name = p.name.copy(allocator), .current = (int)raw, });
     }
 }
 
-fn void FanPath.free(self, Allocator allocator) => free_fields(self, allocator);
+fn void FanPath.free(self, Allocator allocator) => linsys::free_fields(self, allocator);
 
 fn SensorFan[]? sensor_fans(Allocator allocator) {
     @pool() {
         FanPath[] paths = find_fan_paths(allocator)!;
-	free_slice(paths, allocator);
+	linsys::free_slice(paths, allocator);
 
         List{SensorFan} out;
         out.init(allocator);
@@ -233,8 +228,8 @@ fn SensorFan[]? sensor_fans(Allocator allocator) {
     };
 }
 
-fn void SensorFan[].free(self, Allocator allocator) => free_slice(self, allocator);
-fn void SensorFan.free(self, Allocator allocator) => free_fields(self, allocator);
+fn void SensorFan[].free(self, Allocator allocator) => linsys::free_slice(self, allocator);
+fn void SensorFan.free(self, Allocator allocator) => linsys::free_fields(self, allocator);
 
 struct FanPoller {
     FanPath[] paths;
@@ -289,10 +284,10 @@ fn SensorBattery[]? sensor_battery(Allocator allocator) {
                 bat.status = battery_status(io::treadline(&sf)!.trim());
             }
 
-            bat.percent = (double)(read_ulong_file(string::tformat("%s/capacity", base)) ?? 0);
-            bat.energy_now = read_ulong_file(string::tformat("%s/energy_now", base)) ?? 0;
-            bat.energy_full = read_ulong_file(string::tformat("%s/energy_full", base)) ?? 0;
-            bat.power_now = read_ulong_file(string::tformat("%s/power_now", base)) ?? 0;
+            bat.percent = (double)(linsys::read_ulong_file(string::tformat("%s/capacity", base)) ?? 0);
+            bat.energy_now = linsys::read_ulong_file(string::tformat("%s/energy_now", base)) ?? 0;
+            bat.energy_full = linsys::read_ulong_file(string::tformat("%s/energy_full", base)) ?? 0;
+            bat.power_now = linsys::read_ulong_file(string::tformat("%s/power_now", base)) ?? 0;
 
             if (bat.power_now > 0 && bat.energy_now > 0) {
                 bat.secs_left = ((long)((double)bat.energy_now / (double)bat.power_now)) * 3600;
@@ -303,5 +298,5 @@ fn SensorBattery[]? sensor_battery(Allocator allocator) {
     };
 }
 
-fn void SensorBattery[].free(self, Allocator allocator) => free_slice(self, allocator);
-fn void SensorBattery.free(self, Allocator allocator) => free_fields(self, allocator);
+fn void SensorBattery[].free(self, Allocator allocator) => linsys::free_slice(self, allocator);
+fn void SensorBattery.free(self, Allocator allocator) => linsys::free_fields(self, allocator);

@@ -1,4 +1,3 @@
-module linsys;
 import std::os;
 import std::io::file;
 import std::collections::list;
@@ -7,13 +6,13 @@ faultdef
     NO_SUCH_PROCESS, PERMISSION_DENIED, PARSE_ERROR, NOT_SUPPORTED, PROCESS_EXITED, IO_ERROR, SCHED_NO_SUCH_PROCESS, SCHED_PERMISSION_DENIED, SCHED_INVALID, NICE_PERMISSION_DENIED, NICE_NO_SUCH_PROCESS, NICE_INVALID, UNKNOWN, NOT_FOUND
 ;
 
-macro void free_slice(slice, Allocator allocator) {
+macro void free_slice(slice, Allocator allocator) @private {
     $assert $defined(slice[0].free(allocator)) : "element type must have .free(Allocator)";
     foreach (item : slice) item.free(allocator);
     mem::alloc::free(allocator, slice);
 }
 
-macro void free_fields(self, Allocator allocator) {
+macro void free_fields(self, Allocator allocator) @private {
     $foreach $field : $Typeof(self)::members:
         $if $field.type.name == "String":
             mem::alloc::free(allocator, self.$eval($field.name));
@@ -21,7 +20,7 @@ macro void free_fields(self, Allocator allocator) {
     $endforeach
 }
 
-fn TcpState tcp_state(String hex) {
+fn TcpState tcp_state(String hex) @private {
     switch (hex) {
         case "01": return TcpState.ESTABLISHED;
         case "02": return TcpState.SYN_SENT;
@@ -39,11 +38,11 @@ fn TcpState tcp_state(String hex) {
 }
 
 
-fn String ip_to_string(Allocator allocator, uint ip) {
+fn String ip_to_string(Allocator allocator, uint ip) @private {
     return string::format(allocator, "%d.%d.%d.%d", (ip >> 24) & 0xFF, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF);
 }
 
-fn String ip_to_string_v6(Allocator allocator, uint128 ip) {
+fn String ip_to_string_v6(Allocator allocator, uint128 ip) @private {
     ushort[8] groups;
     for (int i = 0; i < 8; i++) {
         groups[i] = (ushort)((ip >> (i * 16)) & 0xFFFF);
@@ -62,12 +61,12 @@ fn String ip_to_string_v6(Allocator allocator, uint128 ip) {
     );
 }
 
-fn uint parse_addr(String hex) {
+fn uint parse_addr(String hex)  @private {
     uint i = (uint)hex.to_long(16) ?? 0;
     return ((i & 0xFF) << 24) | ((i & 0xFF00) << 8) | ((i & 0xFF0000) >> 8) | ((i >> 24) & 0xFF);
 }
 
-fn uint128 parse_addr6(String hex) {
+fn uint128 parse_addr6(String hex)  @private {
     if (hex.len != 32) return (uint128)0;
     uint128 result = 0;
     for (int i = 0; i < 4; i++) {
@@ -77,7 +76,7 @@ fn uint128 parse_addr6(String hex) {
     return result;
 }
 
-fn String? read_file(Allocator allocator, File file) {
+fn String? read_file(Allocator allocator, File file)  @private {
     char[4096] temp;
     DString builder = dstring::new_with_capacity(allocator, 4096);
 
@@ -90,11 +89,18 @@ fn String? read_file(Allocator allocator, File file) {
     return builder.str_view();
 }
 
-fn String[] split_whitespace(Allocator allocator, String s) {
+fn String[] split_whitespace(Allocator allocator, String s)  @private {
     List{String} parts;
     parts.init(allocator);
     foreach (word : s.split(allocator, " ")) {
         if (word.len > 0) parts.push(word);
     }
     return parts.to_array(allocator);
+}
+
+fn ulong? read_ulong_file(String path)  @private {
+    File file = file::open(path, "r")!;
+    defer (void)file.close();
+
+    return io::treadline(&file)!.trim().to_ulong();
 }

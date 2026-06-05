@@ -1,4 +1,5 @@
-module linsys;
+module linsys::disk;
+import linsys @public;
 import std::io;
 import libc;
 import std::collections::list;
@@ -70,7 +71,7 @@ fn DiskPartition[]? disk_partitions(Allocator allocator) {
                 continue;
             }
 
-            String[] fields = split_whitespace(tmem, line);
+            String[] fields = linsys::split_whitespace(tmem, line);
             if (fields.len < 4) {
                 continue;
             }
@@ -89,8 +90,8 @@ fn DiskPartition[]? disk_partitions(Allocator allocator) {
     };
 }
 
-fn void DiskPartition[].free(self, Allocator allocator) => free_slice(self, allocator);
-fn void DiskPartition.free(self, Allocator allocator) => free_fields(self, allocator);
+fn void DiskPartition[].free(self, Allocator allocator) => linsys::free_slice(self, allocator);
+fn void DiskPartition.free(self, Allocator allocator) => linsys::free_fields(self, allocator);
 
 <*
  @require path.len > 0 : "path must not be empty"
@@ -99,7 +100,7 @@ fn DiskUsage? disk_usage(String path) {
     Statvfs svfs = { };
 
     if (statvfs((ZString)path, &svfs) != 0) {
-        return IO_ERROR~;
+        return linsys::IO_ERROR~;
     }
 
     ulong total = svfs.f_blocks * svfs.f_frsize;
@@ -144,7 +145,7 @@ fn ulong DiskContext.get_sector_size(&self, String device) {
 
     @pool() {
         String sector_path = string::tformat("/sys/block/%s/queue/physical_block_size", device);
-        ulong size         = read_ulong_file(sector_path) ?? 512;
+        ulong size         = linsys::read_ulong_file(sector_path) ?? 512;
         self.cache_mutex.lock();
         defer self.cache_mutex.unlock();
 
@@ -161,7 +162,7 @@ fn DiskIoCounters? parse_disk_line(
     String[] fields,
     DiskContext* ctx
 ) @private {
-    if (fields.len < DISKSTATS_MIN_FIELDS) return NOT_FOUND~;
+    if (fields.len < DISKSTATS_MIN_FIELDS) return linsys::NOT_FOUND~;
     ulong sector_size = ctx.get_sector_size(fields[2]);
 
     return {
@@ -188,7 +189,7 @@ fn DiskIoCounters[]? disk_io_counters(Allocator allocator, DiskContext* ctx) {
 
         while (try line = io::treadline(&file)) {
             if (line.len == 0) continue;
-            String[] fields = split_whitespace(tmem, line.trim());
+            String[] fields = linsys::split_whitespace(tmem, line.trim());
             if (try disk = parse_disk_line(allocator, fields, ctx)) {
                 disks.push(disk);
             }
@@ -197,8 +198,8 @@ fn DiskIoCounters[]? disk_io_counters(Allocator allocator, DiskContext* ctx) {
     };
 }
 
-fn void DiskIoCounters[].free(self, Allocator allocator) => free_slice(self, allocator);
-fn void DiskIoCounters.free(self, Allocator allocator) => free_fields(self, allocator);
+fn void DiskIoCounters[].free(self, Allocator allocator) => linsys::free_slice(self, allocator);
+fn void DiskIoCounters.free(self, Allocator allocator) => linsys::free_fields(self, allocator);
 
 <*
  @require device.len > 0 : "device name must not be empty"
@@ -210,14 +211,14 @@ fn DiskIoCounters? disk_io_counters_perdisk(Allocator allocator, String device, 
 
         while (try line = io::treadline(&file)) {
             if (line.len == 0) continue;
-            String[] fields = split_whitespace(tmem, line.trim());
+            String[] fields = linsys::split_whitespace(tmem, line.trim());
             if (fields.len < DISKSTATS_MIN_FIELDS) continue;
             if (fields[2] != device) continue;
             return parse_disk_line(allocator, fields, ctx);
         }
     };
 
-    return NOT_FOUND~;
+    return linsys::NOT_FOUND~;
 }
 
 struct DiskIoPoller {
@@ -249,7 +250,7 @@ macro void? DiskIoPoller.@poll(&self; @body(dio)) {
         self.list.clear();
         while (try line = io::treadline(&self.file)) {
             if (line.len == 0) continue;
-            String[] fields = split_whitespace(tmem, line.trim());
+            String[] fields = linsys::split_whitespace(tmem, line.trim());
             if (try disk = parse_disk_line(tmem, fields, self.ctx)) {
                 self.list.push(disk);
             }
@@ -267,14 +268,14 @@ macro void? DiskIoPoller.@poll_perdisk(&self, String device; @body(dio)) {
         bool found = false;
         while (try line = io::treadline(&self.file)) {
             if (line.len == 0) continue;
-            String[] fields = split_whitespace(tmem, line.trim());
+            String[] fields = linsys::split_whitespace(tmem, line.trim());
             if (fields.len < DISKSTATS_MIN_FIELDS) continue;
             if (fields[2] != device) continue;
             found = true;
             if (try dio = parse_disk_line(tmem, fields, self.ctx)) {
                 @body(dio);
             }
-            if (!found) return NOT_FOUND~;
+            if (!found) return linsys::NOT_FOUND~;
         }
     };
 }

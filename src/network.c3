@@ -1,4 +1,5 @@
-module linsys;
+module linsys::network;
+import linsys @public;
 import std::io;
 import std::collections::list;
 import std::time;
@@ -81,11 +82,11 @@ struct NetConnPoller {
 
 fn NetIoCounters? parse_net_io_line(Allocator allocator, String line) @private {
     sz? idx = line.index_of_char(':');
-    if (catch idx) return PARSE_ERROR~;
+    if (catch idx) return linsys::PARSE_ERROR~;
 
     String iface = line[:idx].trim();
 
-    String[] fields = split_whitespace(tmem, line[idx + 1..].trim());
+    String[] fields = linsys::split_whitespace(tmem, line[idx + 1..].trim());
 
     return {
         .name = iface.copy(allocator),
@@ -184,8 +185,8 @@ fn NetIoCounters[]? net_io_counters(Allocator allocator) {
     };
 }
 
-fn void NetIoCounters[].free(self, Allocator allocator) => free_slice(self, allocator);
-fn void NetIoCounters.free(self, Allocator allocator) => free_fields(self, allocator);
+fn void NetIoCounters[].free(self, Allocator allocator) => linsys::free_slice(self, allocator);
+fn void NetIoCounters.free(self, Allocator allocator) => linsys::free_fields(self, allocator);
 
 fn void? read_system_connections(
     Allocator allocator,
@@ -199,7 +200,7 @@ fn void? read_system_connections(
 
         while (try line = io::treadline(file)) {
             if (i++ == 0 || line.len == 0) continue;
-            String[] fields = split_whitespace(tmem, line.trim());
+            String[] fields = linsys::split_whitespace(tmem, line.trim());
             if (fields.len < 4) continue;
 
             sz? colon_l = fields[1].index_of_char(':');
@@ -214,17 +215,17 @@ fn void? read_system_connections(
 
             out.push(
                 {
-                    .local_addr = is_v6 ? ip_to_string_v6(
+                    .local_addr = is_v6 ? linsys::ip_to_string_v6(
                         allocator,
-                        parse_addr6(local_addr)
-                    ) : ip_to_string(allocator, parse_addr(local_addr)),
-                    .remote_addr = is_v6 ? ip_to_string_v6(
+                        linsys::parse_addr6(local_addr)
+                    ) : linsys::ip_to_string(allocator, linsys::parse_addr(local_addr)),
+                    .remote_addr = is_v6 ? linsys::ip_to_string_v6(
                         allocator,
-                        parse_addr6(remote_addr)
-                    ) : ip_to_string(allocator, parse_addr(remote_addr)),
+                        linsys::parse_addr6(remote_addr)
+                    ) : linsys::ip_to_string(allocator, linsys::parse_addr(remote_addr)),
                     .local_port = (ushort)(local_port.to_long(16) ?? 0),
                     .remote_port = (ushort)(remote_port.to_long(16) ?? 0),
-                    .state = tcp_state(fields[3]),
+                    .state = linsys::tcp_state(fields[3]),
                     .protocol = proto,
                 }
             );
@@ -276,7 +277,7 @@ fn String sockaddr_to_string(Allocator allocator, void* sa) @private {
 
 fn NetIfAddr[]? net_if_addrs(Allocator allocator) {
     IfAddrs* head = null;
-    if (getifaddrs(&head) != 0) return IO_ERROR~;
+    if (getifaddrs(&head) != 0) return linsys::IO_ERROR~;
     defer freeifaddrs(head);
 
     List{NetIfAddr} list;
@@ -305,8 +306,8 @@ fn NetIfAddr[]? net_if_addrs(Allocator allocator) {
     return list.to_array(allocator);
 }
 
-fn void NetIfAddr[].free(self, Allocator allocator) => free_slice(self, allocator);
-fn void NetIfAddr.free(self, Allocator allocator) => free_fields(self, allocator);
+fn void NetIfAddr[].free(self, Allocator allocator) => linsys::free_slice(self, allocator);
+fn void NetIfAddr.free(self, Allocator allocator) => linsys::free_fields(self, allocator);
 
 fn NetIfStats[]? net_if_stats(Allocator allocator) {
     @pool() {
@@ -330,7 +331,7 @@ fn NetIfStats[]? net_if_stats(Allocator allocator) {
 
             if (try File f = file::open(oper, "r")) {
                 defer (void)f.close();
-                String state = read_file(tmem, f)!.trim();
+                String state = linsys::read_file(tmem, f)!.trim();
                 st.is_up = state == "up";
             }
 
@@ -338,21 +339,21 @@ fn NetIfStats[]? net_if_stats(Allocator allocator) {
 
             if (try File f = file::open(mtu, "r")) {
                 defer (void)f.close();
-                st.mtu = read_file(tmem, f)!.trim().to_int() ?? 0;
+                st.mtu = linsys::read_file(tmem, f)!.trim().to_int() ?? 0;
             }
 
             String speed = string::tformat("%s/speed", base);
 
             if (try File f = file::open(speed, "r")) {
                 defer (void)f.close();
-                st.speed = read_file(tmem, f)!.trim().to_int() ?? 0;
+                st.speed = linsys::read_file(tmem, f)!.trim().to_int() ?? 0;
             }
 
             String flags = string::tformat("%s/flags", base);
 
             if (try File f = file::open(flags, "r")) {
                 defer (void)f.close();
-                st.flags = read_file(tmem, f)!.trim().to_ulong(16) ?? 0;
+                st.flags = linsys::read_file(tmem, f)!.trim().to_ulong(16) ?? 0;
             }
 
             stats.push(st);
@@ -362,5 +363,5 @@ fn NetIfStats[]? net_if_stats(Allocator allocator) {
     };
 }
 
-fn void NetIfStats[].free(self, Allocator allocator) => free_slice(self, allocator);
-fn void NetIfStats.free(self, Allocator allocator) => free_fields(self, allocator);
+fn void NetIfStats[].free(self, Allocator allocator) => linsys::free_slice(self, allocator);
+fn void NetIfStats.free(self, Allocator allocator) => linsys::free_fields(self, allocator);
