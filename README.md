@@ -59,9 +59,10 @@ module linsys;
 import std::io;
 
 fn int main(String[] args) {
-    ProcessInfo pi = get_info(tmem, 1) ?? {};
-    io::printn(pi);
-
+    @pool(){
+        ProcessInfo pi = get_info(tmem, 1) ?? {};
+        io::printn(pi);
+    };
     return 0;
 }
 ```
@@ -79,9 +80,10 @@ module linsys;
 import std::io;
 
 fn int main(String[] args) {
-    VirtualMemory mem = virtual_memory() ?? {};
-    io::printn(mem);
-
+    @pool() {
+        VirtualMemory mem = virtual_memory() ?? {};
+        io::printn(mem);
+    };
     return 0;
 }
 ```
@@ -100,9 +102,10 @@ module linsys;
 import std::io;
 
 fn int main(String[] args) {
-    DiskUsage usage = disk_usage("/") ?? {};
-    io::printn(usage);
-
+    @pool() {
+        DiskUsage usage = disk_usage("/") ?? {};
+        io::printn(usage);
+    };
     return 0;
 }
 ```
