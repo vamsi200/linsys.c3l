@@ -88,6 +88,7 @@ fn NetIoCounters? parse_net_io_line(Allocator allocator, String line) @private {
 
     String[] fields = linsys::split_whitespace(tmem, line[idx + 1..].trim());
 
+    // TODO: error here?
     return {
         .name = iface.copy(allocator),
         .bytes_recv = fields.len > 0 ? (fields[0].to_ulong() ?? 0) : 0,
@@ -205,8 +206,15 @@ fn void? read_system_connections(
 
             sz? colon_l = fields[1].index_of_char(':');
             sz? colon_r = fields[2].index_of_char(':');
-            if (catch colon_l) continue;
-            if (catch colon_r) continue;
+
+            if (catch colon_l) {
+                linsys::push_error("connection::local_addr", linsys::PARSE_ERROR);
+                continue;
+            }
+            if (catch colon_r) {
+                linsys::push_error("connection::remote_addr", linsys::PARSE_ERROR);
+                continue;
+            }
 
             String local_addr  = fields[1][:colon_l];
             String local_port  = fields[1][colon_l + 1..];

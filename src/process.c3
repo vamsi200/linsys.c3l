@@ -154,25 +154,25 @@ fn ProcessInfo? get_info(Allocator allocator, int pid) {
 
             switch (key) {
                 case "Threads":
-                    if (try int threads = data.to_int()) proc.threads = threads;
+                    linsys::@try_field(proc.threads, data.to_int(), "processinfo::threads", 0);
 
                 case "Uid":
                     if (try long uid_idx = first.index_of_char('\t')) {
                         first = uid_idx == -1 ? first : first[:uid_idx];
-                        if (try int uid = first.to_int()) proc.uid = uid;
+                        linsys::@try_field(proc.uid, first.to_int(), "processinfo::uid", 0);
                     }
 
                 case "Gid":
                     if (try long gid_idx = first.index_of_char('\t')) {
                         first = gid_idx == -1 ? first : first[:gid_idx];
-                        if (try int gid = first.to_int()) proc.gid = gid;
+                        linsys::@try_field(proc.gid, first.to_int(), "processinfo::gid", 0);
                     }
 
                 case "Pid":
-                    if (try int parse_pid = data.to_int()) p.pid = parse_pid;
+                    linsys::@try_field(p.pid, data.to_int(), "processinfo::pid", 0);
 
                 case "PPid":
-                    if (try int parse_ppid = data.to_int()) p.ppid = parse_ppid;
+                    linsys::@try_field(p.ppid, data.to_int(), "processinfo::ppid", 0);
 
                 case "Name":
                     p.name = data.copy(allocator);
@@ -180,13 +180,18 @@ fn ProcessInfo? get_info(Allocator allocator, int pid) {
                 case "VmSize":
                     if (try long vms_idx = first.index_of_char(' ')) {
                         first = vms_idx == -1 ? first : first[:vms_idx];
-                        if (try ulong vms = first.to_ulong()) proc.vm_size = vms;
+                        linsys::@try_field(
+                            proc.vm_size,
+                            first.to_ulong(),
+                            "processinfo::vmsize",
+                            0
+                        );
                     }
 
                 case "VmRSS":
                     if (try long vmrss_idx = first.index_of_char(' ')) {
                         first = vmrss_idx == -1 ? first : first[:vmrss_idx];
-                        if (try ulong vmrss = first.to_ulong()) proc.vm_rss = vmrss;
+                        linsys::@try_field(proc.vm_rss, first.to_ulong(), "processinfo::vmrss", 0);
                     }
 
                 case "State":
@@ -198,16 +203,16 @@ fn ProcessInfo? get_info(Allocator allocator, int pid) {
         }
     };
 
-    proc.exe_path = read_exe(allocator, pid) ?? "".copy(allocator);
-    proc.cmdline = read_cmdline(allocator, pid) ?? "".copy(allocator);
+    linsys::@try_field(proc.exe_path, read_exe(allocator, pid), "exe", "".copy(allocator));
+    linsys::@try_field(proc.cmdline, read_cmdline(allocator, pid), "cmdline", "".copy(allocator));
     proc.process = p;
 
     return proc;
 }
 
 fn void ProcessInfo.free(self, Allocator allocator) {
-	linsys::free_fields(self, allocator);
-	linsys::free_fields(self.process, allocator);
+    linsys::free_fields(self, allocator);
+    linsys::free_fields(self.process, allocator);
 }
 
 fn ProcState proc_state(char c) @private {
@@ -248,10 +253,10 @@ fn Process? get_proc(Allocator allocator, int pid) {
 
             switch (key) {
                 case "Pid":
-                    if (try parse_pid = data.to_int()) p.pid = parse_pid;
+                    linsys::@try_field(p.pid, data.to_int(), "process::pid", 0);
 
                 case "PPid":
-                    if (try parse_ppid = data.to_int()) p.ppid = parse_ppid;
+                    linsys::@try_field(p.ppid, data.to_int(), "process::ppid", 0);
 
                 case "Name":
                     p.name = data.copy(allocator);
@@ -294,10 +299,15 @@ fn String? readlink_alloc(Allocator allocator, ZString path) @private {
     char[256] buf;
     DString result = dstring::new_with_capacity(allocator, 256);
     defer result.free();
-
     while (true) {
         sz n = libc::readlink(path, &buf, buf.len);
-        if (n < 0) return linsys::IO_ERROR~;
+        if (n < 0) {
+            switch (libc::errno()) {
+                case EACCES: return linsys::PERMISSION_DENIED~;
+                case ENOENT: return linsys::PROCESS_EXITED~;
+                default: return linsys::IO_ERROR~;
+            }
+        }
         result.append((String)buf[:n]);
         if (n < buf.len) break;
     }
@@ -309,7 +319,7 @@ fn String? readlink_alloc(Allocator allocator, ZString path) @private {
 *>
 fn String? read_exe(Allocator allocator, int pid) {
     String path = string::tformat("/proc/%d/exe", pid);
-    return readlink_alloc(allocator, path.zstr_tcopy()) ?? linsys::PROCESS_EXITED~;
+    return readlink_alloc(allocator, path.zstr_tcopy());
 }
 
 fn int[]? list_pids(Allocator allocator) {
@@ -463,7 +473,11 @@ fn MemoryMap[]? maps(Allocator allocator, int pid) {
         foreach (line : content.tsplit("\n")) {
             if (line.len == 0) continue;
             String[] split = linsys::split_whitespace(tmem, line);
-            if (split.len < 5) continue;
+
+            if (split.len < 5) {
+                linsys::push_error("maps", linsys::PARSE_ERROR);
+                continue;
+            }
 
             MemoryMap entry = {
                 .address_range = split[0].copy(allocator),
@@ -471,8 +485,9 @@ fn MemoryMap[]? maps(Allocator allocator, int pid) {
                 .device = split[3].copy(allocator),
             };
 
-            if (try long o = split[2].to_long()) entry.offset = o;
-            if (try long n = split[4].to_long()) entry.inode = n;
+            linsys::@try_field(entry.offset, split[2].to_long(), "memorymap::offset", 0);
+            linsys::@try_field(entry.inode, split[4].to_long(), "memorymap::inode", 0);
+
             if (split.len > 5) entry.pathname = string::tjoin(split[5..], " ").trim()
                 .copy(allocator);
             mm.push(entry);
@@ -538,32 +553,45 @@ fn OpenFile[]? open_files(Allocator allocator, int pid) {
 
         foreach (fd : fd_list) {
             String fd_path = string::tformat("/proc/%d/fd/%d", pid, fd);
-            if (!os::native_file_or_dir_exists(fd_path)) continue;
 
-            if (try String target = readlink_alloc(allocator, fd_path.zstr_tcopy())) {
-                if (!target.starts_with("/") || target.ends_with(" (deleted)")) continue;
+            if (!os::native_file_or_dir_exists(fd_path)) {
+                linsys::push_error(fd_path, linsys::PATH_NOT_FOUND);
+                continue;
+            }
 
-                if (!os::native_file_or_dir_exists(target)) continue;
+            String? target = readlink_alloc(allocator, fd_path.zstr_tcopy());
+            if (catch err = target) {
+                linsys::push_error("openfile::fd_link", err);
+                continue;
+            }
 
-                OpenFile entry   = { .fd = fd, .path = target };
-                String info_path = string::tformat("/proc/%d/fdinfo/%d", pid, fd);
-                File file        = file::open(info_path, "r")!;
-                defer (void)file.close();
+            if (!target.starts_with("/") || target.ends_with(" (deleted)")) continue;
 
-                while (try line = io::treadline(&file)) {
-                    line = line.trim();
-                    if (!line.starts_with("flags:")) continue;
-                    String flags_str = line["flags:".len..].trim();
+            if (!os::native_file_or_dir_exists(target)) {
+                linsys::push_error(target, linsys::PATH_NOT_FOUND);
+                continue;
+            }
 
-                    if (try int flags = flags_str.to_int(8)) {
-                        entry.mode = flags_to_mode(flags, allocator);
-                    }
+            OpenFile entry   = { .fd = fd, .path = target };
+            String info_path = string::tformat("/proc/%d/fdinfo/%d", pid, fd);
+            File file        = file::open(info_path, "r")!;
+            defer (void)file.close();
 
-                    break;
+            while (try line = io::treadline(&file)) {
+                line = line.trim();
+                if (!line.starts_with("flags:")) continue;
+                String flags_str = line["flags:".len..].trim();
+
+                if (try int flags = flags_str.to_int(8)) {
+                    entry.mode = flags_to_mode(flags, allocator);
+                } else {
+                    linsys::push_error("openfile::flags", linsys::PARSE_ERROR);
                 }
 
-                of.push(entry);
+                break;
             }
+
+            of.push(entry);
         }
     };
 
@@ -593,12 +621,17 @@ fn void? read_connections(
 
         String path = string::tformat("/proc/%d/net/%s", pid, filename);
 
-        if (!os::native_file_or_dir_exists(path)) return;
+        if (!os::native_file_or_dir_exists(path)) {
+            linsys::push_error(path, linsys::PATH_NOT_FOUND);
+            return;
+        }
 
         File file = file::open(path, "r")!;
         defer (void)file.close();
         String content = linsys::read_file(tmem, file)!;
         bool is_v6     = proto == Protocol.TCP6 || proto == Protocol.UDP6;
+        ushort lp      = 0;
+        ushort rp      = 0;
 
         foreach (i, line : content.split(tmem, "\n")) {
             if (i == 0 || line.len == 0) continue;
@@ -609,11 +642,34 @@ fn void? read_connections(
                 if (f.len > 0) raw[n++] = f;
             }
 
-            if (n < 4) continue;
+            if (n < 4) {
+                linsys::push_error("connection::line", linsys::PARSE_ERROR);
+                continue;
+            }
+
             sz? colon_l = raw[1].index_of_char(':');
             sz? colon_r = raw[2].index_of_char(':');
-            if (catch colon_l) continue;
-            if (catch colon_r) continue;
+            if (catch colon_l) {
+                linsys::push_error("connection::local_addr", linsys::PARSE_ERROR);
+                continue;
+            }
+            if (catch colon_r) {
+                linsys::push_error("connection::remote_addr", linsys::PARSE_ERROR);
+                continue;
+            }
+
+            linsys::@try_field(
+                lp,
+                (ushort)(raw[1][colon_l + 1..].to_long(16)),
+                "connection::local_port",
+                0
+            );
+            linsys::@try_field(
+                rp,
+                (ushort)(raw[2][colon_l + 1..].to_long(16)),
+                "connection::remote_port",
+                0
+            );
 
             out.push(
                 {
@@ -625,8 +681,8 @@ fn void? read_connections(
                         allocator,
                         linsys::parse_addr6(raw[2][:colon_r])
                     ) : linsys::ip_to_string(allocator, linsys::parse_addr(raw[2][:colon_r])),
-                    .local_port = (ushort)(raw[1][colon_l + 1..].to_long(16) ?? 0),
-                    .remote_port = (ushort)(raw[2][colon_r + 1..].to_long(16) ?? 0),
+                    .local_port = lp,
+                    .remote_port = rp,
                     .state = linsys::tcp_state(raw[3]),
                     .protocol = proto,
                 }
@@ -758,10 +814,29 @@ fn CpuTimes? cpu_times_parse(String path) @private {
 
     if (fields.len > 14) {
         double clk = clktck();
-        if (try double utime = fields[11].to_double()) cpu.user = utime / clk;
-        if (try double stime = fields[12].to_double()) cpu.system = stime / clk;
-        if (try double cutime = fields[13].to_double()) cpu.children_user = cutime / clk;
-        if (try double cstime = fields[14].to_double()) cpu.children_system = cstime / clk;
+
+        if (try double utime = fields[11].to_double()) {
+            cpu.user = utime / clk;
+        } else {
+            linsys::push_error("cputimes::user", linsys::PARSE_ERROR);
+        }
+        if (try double stime = fields[12].to_double()) {
+            cpu.system = stime / clk;
+        } else {
+            linsys::push_error("cputimes::system", linsys::PARSE_ERROR);
+        }
+
+        if (try double cutime = fields[13].to_double()) {
+            cpu.children_user = cutime / clk;
+        } else {
+            linsys::push_error("cputimes::childre_user", linsys::PARSE_ERROR);
+        }
+
+        if (try double cstime = fields[14].to_double()) {
+            cpu.children_system = cstime / clk;
+        } else {
+            linsys::push_error("cputimes::children_system", linsys::PARSE_ERROR);
+        }
     }
     return cpu;
 }
@@ -901,9 +976,14 @@ fn IoCounters? io_counters(int pid) {
 
         while (try line = io::treadline(&file)) {
             String[] split = line.split(tmem, ":");
-            if (split.len < 2) continue;
+            if (split.len < 2) {
+                linsys::push_error("iocounters::line", linsys::PARSE_ERROR);
+                continue;
+            }
+
             String key = split[0].trim();
-            ulong v    = split[1].trim().to_ulong() ?? 0;
+            ulong v    = 0;
+            linsys::@try_field(v, split[1].trim().to_ulong(), "iocounters::value", 0);
 
             switch (key) {
                 case "rchar": ioc.read_count = v;
@@ -1051,8 +1131,8 @@ struct CpuSet {
     ulong[16] bits;
 }
 
-extern fn CInt sched_setaffinity(CInt pid, usz cpusetsize, CpuSet* mask);
-extern fn CInt sched_getaffinity(CInt pid, usz cpusetsize, CpuSet* mask);
+extern fn CInt sched_setaffinity(CInt pid, usz cpusetsize, CpuSet* mask) @private;
+extern fn CInt sched_getaffinity(CInt pid, usz cpusetsize, CpuSet* mask) @private;
 
 <*
  @require pid > 0 : "pid must be positive"
@@ -1125,7 +1205,12 @@ fn RLimitEntry[]? rlimits_get(Allocator allocator, int pid) {
                 if (pc == 4) break;
             }
 
-            if (pc < 3) continue;
+            if (pc < 3) {
+                linsys::push_error("rlimitentry::line", linsys::PARSE_ERROR);
+                continue;
+            }
+
+            // TODO: add error here?
             ulong soft = filtered[1] == "unlimited" ? ulong::max : (filtered[1].to_ulong() ?? 0);
             ulong hard = filtered[2] == "unlimited" ? ulong::max : (filtered[2].to_ulong() ?? 0);
 

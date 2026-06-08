@@ -74,7 +74,7 @@ struct CpuTemp {
     double critical;
 }
 
-fn SystemCpuTimes? sys_cpu_times() {
+fn SystemCpuTimes? cpu_times() {
     File file = file::open("/proc/stat", "r")!;
     defer (void)file.close();
     String content = linsys::read_file(tmem, file)!;
@@ -88,6 +88,7 @@ fn SystemCpuTimes? sys_cpu_times() {
 
     String[] raw = linsys::split_whitespace(tmem, line);
 
+    // TODO: error here?
     return {
         .user = raw.len > 1 ? (raw[1].to_ulong() ?? 0) : 0,
         .nice = raw.len > 2 ? (raw[2].to_ulong() ?? 0) : 0,
@@ -102,7 +103,7 @@ fn SystemCpuTimes? sys_cpu_times() {
     };
 }
 
-fn SystemCpuTimes[]? sys_cpu_times_percpu(Allocator allocator) {
+fn SystemCpuTimes[]? cpu_times_percpu(Allocator allocator) {
     File file = file::open("/proc/stat", "r")!;
     defer (void)file.close();
 
@@ -125,6 +126,7 @@ fn SystemCpuTimes[]? sys_cpu_times_percpu(Allocator allocator) {
             continue;
         }
 
+    // TODO: error here?
         cpus.push(
             {
                 .user = fields.len > 1 ? (fields[1].to_ulong() ?? 0) : 0,
@@ -147,7 +149,7 @@ fn SystemCpuTimes[]? sys_cpu_times_percpu(Allocator allocator) {
 fn void SystemCpuTimes[].free(self, Allocator allocator) => linsys::free_slice(self, allocator);
 fn void SystemCpuTimes.free(self, Allocator allocator) => linsys::free_fields(self, allocator);
 
-fn SystemCpuSnapshot? sys_cpu_snapshot() {
+fn SystemCpuSnapshot? cpu_snapshot() {
     File file = file::open("/proc/stat", "r")!;
     defer (void)file.close();
 
@@ -176,7 +178,7 @@ fn SystemCpuSnapshot? sys_cpu_snapshot() {
     return linsys::PARSE_ERROR~;
 }
 
-fn SystemCpuSnapshot[]? sys_cpu_snapshot_percpu(Allocator allocator) {
+fn SystemCpuSnapshot[]? cpu_snapshot_percpu(Allocator allocator) {
     File file = file::open("/proc/stat", "r")!;
     defer (void)file.close();
     List{SystemCpuSnapshot} cs;
@@ -210,7 +212,7 @@ fn SystemCpuSnapshot[]? sys_cpu_snapshot_percpu(Allocator allocator) {
 fn void SystemCpuSnapshot[].free(self, Allocator allocator) => linsys::free_slice(self, allocator);
 fn void SystemCpuSnapshot.free(self, Allocator allocator) => linsys::free_fields(self, allocator);
 
-fn double sys_cpu_percent(SystemCpuSnapshot old, SystemCpuSnapshot new) {
+fn double cpu_percent(SystemCpuSnapshot old, SystemCpuSnapshot new) {
     ulong total_delta = new.total - old.total;
     ulong idle_delta  = new.idle - old.idle;
 
@@ -224,7 +226,7 @@ fn double sys_cpu_percent(SystemCpuSnapshot old, SystemCpuSnapshot new) {
 <*
  @require new.len == old.len : "snapshot arrays must be same length"
 *>
-fn double[]? sys_cpu_percent_percpu(
+fn double[]? cpu_percent_percpu(
     Allocator allocator,
     SystemCpuSnapshot[] old,
     SystemCpuSnapshot[] new
@@ -525,7 +527,8 @@ fn CpuTemp[]? cpu_temps(Allocator allocator) {
             if (catch ty) continue;
             defer (void)ty.close();
 
-            double current = ((double)(linsys::read_file(tmem, tf)!.trim().to_long() ?? 0) / 1000.0);
+            double current = ((double)(linsys::read_file(tmem, tf)!.trim()
+                .to_long() ?? 0) / 1000.0);
 
             String sensor = linsys::read_file(tmem, ty)!.trim().copy(allocator);
 

@@ -3,7 +3,7 @@ import std::io::file;
 import std::collections::list;
 
 faultdef
-    NO_SUCH_PROCESS, PERMISSION_DENIED, PARSE_ERROR, NOT_SUPPORTED, PROCESS_EXITED, IO_ERROR, SCHED_NO_SUCH_PROCESS, SCHED_PERMISSION_DENIED, SCHED_INVALID, NICE_PERMISSION_DENIED, NICE_NO_SUCH_PROCESS, NICE_INVALID, UNKNOWN, NOT_FOUND
+    NO_SUCH_PROCESS, PERMISSION_DENIED, PARSE_ERROR, NOT_SUPPORTED, PROCESS_EXITED, IO_ERROR, SCHED_NO_SUCH_PROCESS, SCHED_PERMISSION_DENIED, SCHED_INVALID, NICE_PERMISSION_DENIED, NICE_NO_SUCH_PROCESS, NICE_INVALID, UNKNOWN, NOT_FOUND, PATH_NOT_FOUND
 ;
 
 macro void free_slice(slice, Allocator allocator) @private {
@@ -18,6 +18,54 @@ macro void free_fields(self, Allocator allocator) @private {
             mem::alloc::free(allocator, self.$eval($field.name));
         $endif
     $endforeach
+}
+
+struct FieldError {
+   String field;
+   fault f;
+}
+
+alias ErrorList = List { FieldError };
+tlocal ErrorList* field_errors = null;
+tlocal ErrorContext error_ctx_storage;
+
+struct ErrorContext {
+    Allocator allocator;
+    ErrorList errors;
+}
+
+tlocal ErrorContext* error_ctx = null;
+
+fn void init_errors(Allocator allocator) {
+    error_ctx = &error_ctx_storage;
+    error_ctx.allocator = allocator;
+    error_ctx.errors.init(allocator);
+}
+
+fn void push_error(String field, fault f) {
+    if (error_ctx == null) return;
+    error_ctx.errors.push({ field, f });
+}
+
+fn ErrorList* list_errors() {
+    if (error_ctx == null) return null;
+    return &error_ctx.errors;
+}
+
+fn void free_errors() {
+    if (error_ctx == null) return;
+    error_ctx.errors.free();
+    error_ctx = null;
+}
+
+macro void @try_field(#v, #expr, String field, #fallback) {
+    var res = #expr;
+    if (catch err = res) {
+        linsys::push_error(field, err);
+        #v = #fallback;
+    } else {
+        #v = res;
+    }
 }
 
 fn TcpState tcp_state(String hex) @private {

@@ -105,7 +105,11 @@ fn SensorPath[]? get_sensor_paths(Allocator allocator) @private {
             for (int i = 1; i <= 32; i++) {
                 String input = string::tformat("%s/temp%d_input", base, i);
                 ulong? raw   = linsys::read_ulong_file(input);
-                if (catch raw) continue;
+                if (catch raw) {
+                    linsys::push_error("sensorpath::line", linsys::PARSE_ERROR);
+                    continue;
+                }
+
                 paths.push(
                     {
                         .input = input.copy(allocator),
@@ -192,7 +196,11 @@ fn FanPath[]? find_fan_paths(Allocator allocator) @private {
             for (int i = 1; i <= 32; i++) {
                 String input = string::tformat("%s/fan%d_input", base, i);
                 ulong? raw   = linsys::read_ulong_file(input);
-                if (catch raw) continue;
+                if (catch raw) {
+                    linsys::push_error("fanpath::line", linsys::PARSE_ERROR);
+                    continue;
+                }
+
                 paths.push(
                     {
                         .input = input.copy(allocator),
@@ -208,7 +216,10 @@ fn FanPath[]? find_fan_paths(Allocator allocator) @private {
 fn void? parse_sensor_fans(Allocator allocator, FanPath[] paths, List{SensorFan}* out) @private {
     foreach (p : paths) {
         ulong? raw = linsys::read_ulong_file(p.input);
-        if (catch raw) continue;
+        if (catch raw) {
+            linsys::push_error("sensor_fans::line", linsys::PARSE_ERROR);
+            continue;
+        }
         out.push({ .name = p.name.copy(allocator), .current = (int)raw, });
     }
 }
@@ -218,7 +229,7 @@ fn void FanPath.free(self, Allocator allocator) => linsys::free_fields(self, all
 fn SensorFan[]? sensor_fans(Allocator allocator) {
     @pool() {
         FanPath[] paths = find_fan_paths(allocator)!;
-	linsys::free_slice(paths, allocator);
+        linsys::free_slice(paths, allocator);
 
         List{SensorFan} out;
         out.init(allocator);
@@ -284,7 +295,9 @@ fn SensorBattery[]? sensor_battery(Allocator allocator) {
                 bat.status = battery_status(io::treadline(&sf)!.trim());
             }
 
-            bat.percent = (double)(linsys::read_ulong_file(string::tformat("%s/capacity", base)) ?? 0);
+            bat.percent = (double)(linsys::read_ulong_file(
+                string::tformat("%s/capacity", base)
+            ) ?? 0);
             bat.energy_now = linsys::read_ulong_file(string::tformat("%s/energy_now", base)) ?? 0;
             bat.energy_full = linsys::read_ulong_file(string::tformat("%s/energy_full", base)) ?? 0;
             bat.power_now = linsys::read_ulong_file(string::tformat("%s/power_now", base)) ?? 0;

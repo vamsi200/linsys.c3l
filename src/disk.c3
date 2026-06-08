@@ -49,7 +49,7 @@ struct Statvfs {
     char[128] __f_spare; // enough headroom I guess
 }
 
-extern fn int statvfs(ZString path, Statvfs* buf);
+extern fn int statvfs(ZString path, Statvfs* buf) @private;
 
 struct DiskContext {
     HashMap{String, ulong} sector_size_cache;
