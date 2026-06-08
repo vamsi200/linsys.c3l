@@ -38,6 +38,12 @@ However, functions will still fail normally in cases where the primary operation
 Other APIs like example - `cpu_affinity_set` will fail directly and should be handled explicitly by the caller.
 
 # Installation
+Create a new C3 project ( get latest compiler - https://github.com/c3lang/c3c)
+
+```bash
+c3c init app
+cd app
+```
 
 Using `c3l`:
 
@@ -113,8 +119,8 @@ Output:
 ```
 
 # API Reference (could change)
-Get info using:
+Get the api's using:
+
 ```bash
 c3c docgen
 ```
-![Docs](window.png)
