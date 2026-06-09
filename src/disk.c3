@@ -135,7 +135,7 @@ fn void DiskContext.free(&self) {
     self.cache_mutex.destroy();
 }
 
-fn ulong DiskContext.get_sector_size(&self, String device) {
+fn ulong DiskContext.sector_size(&self, String device) {
     self.cache_mutex.lock();
 
     if (try ulong size = self.sector_size_cache.get(device)) {
@@ -160,7 +160,7 @@ const int DISKSTATS_MIN_FIELDS = 14; // kernel 2.6+
 
 fn DiskIoCounters? parse_line(Allocator allocator, String[] fields, DiskContext* ctx) @private {
     if (fields.len < DISKSTATS_MIN_FIELDS) return linsys::NOT_FOUND~;
-    ulong sector_size = ctx.get_sector_size(fields[2]);
+    ulong sector_size = ctx.sector_size(fields[2]);
 
     ulong rc  = 0;
     ulong rmc = 0;
@@ -251,7 +251,7 @@ struct DiskIoPoller {
     Allocator allocator;
 }
 
-fn DiskIoPoller? io_poller_new(Allocator allocator, DiskContext* ctx) {
+fn DiskIoPoller? poller(Allocator allocator, DiskContext* ctx) {
     List{DiskIoCounters} list;
     list.init(allocator);
     return {

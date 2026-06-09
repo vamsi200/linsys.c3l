@@ -8,6 +8,7 @@ import std::collections::list;
 import std::net;
 import std::os::posix;
 import std::thread;
+import std::math;
 
 struct Process {
     int pid;
@@ -32,9 +33,9 @@ enum ProcState {
 
 struct MemoryMap {
     String address_range;
-    String perms;
+    char[4] perms;
     long offset;
-    String device;
+    char[9] device;
     long inode;
     String pathname;
 }
@@ -134,7 +135,7 @@ struct ProcessPoller {
 <*
  @require pid > 0 : "pid must be positive"
 *>
-fn ProcessInfo? get_info(Allocator allocator, int pid) {
+fn ProcessInfo? info(Allocator allocator, int pid) {
     ProcessInfo proc = { };
     Process p        = { };
 
@@ -235,7 +236,7 @@ fn ProcState proc_state(char c) @private {
 <*
  @require pid > 0 : "pid must be positive"
 *>
-fn Process? get_proc(Allocator allocator, int pid) {
+fn Process? proc(Allocator allocator, int pid) {
     Process p;
 
     @pool() {
@@ -466,9 +467,8 @@ fn MemoryMap[]? maps(Allocator allocator, int pid) {
         String p  = string::tformat("/proc/%d/maps", pid);
         File file = file::open(p, "r")!;
         defer (void)file.close();
-        String content = linsys::read_file(tmem, file)!;
 
-        foreach (line : content.tsplit("\n")) {
+        while (try line = io::treadline(&file)) {
             if (line.len == 0) continue;
             String[] split = linsys::split_whitespace(tmem, line);
 
@@ -477,11 +477,10 @@ fn MemoryMap[]? maps(Allocator allocator, int pid) {
                 continue;
             }
 
-            MemoryMap entry = {
-                .address_range = split[0].copy(allocator),
-                .perms = split[1].copy(allocator),
-                .device = split[3].copy(allocator),
-            };
+            MemoryMap entry;
+            entry.address_range = split[0].copy(allocator);
+            mem::copy(&entry.perms, split[1].ptr, math::min(split[1].len, entry.perms.len));
+            mem::copy(&entry.device, split[3].ptr, math::min(split[3].len, entry.device.len));
 
             linsys::@try_field(entry.offset, split[2].to_long(), "memorymap::offset", 0);
             linsys::@try_field(entry.inode, split[4].to_long(), "memorymap::inode", 0);
@@ -525,7 +524,7 @@ fn String flags_to_mode(int flags, Allocator allocator) @private {
         { 0o2000000, "cloexec" }, // O_CLOEXEC
         };
 
-    DString result = dstring::new_with_capacity(allocator, 32);
+    DString result = dstring::new_with_capacity(tmem, 32);
 
     result.append(access);
 
@@ -557,39 +556,40 @@ fn OpenFile[]? open_files(Allocator allocator, int pid) {
                 continue;
             }
 
-            String? target = readlink_alloc(allocator, fd_path.zstr_tcopy());
-            if (catch err = target) {
-                linsys::push_error("openfile::fd_link", err);
-                continue;
-            }
-
-            if (!target.starts_with("/") || target.ends_with(" (deleted)")) continue;
-
-            if (!os::native_file_or_dir_exists(target)) {
-                linsys::push_error(target, linsys::PATH_NOT_FOUND);
-                continue;
-            }
-
-            OpenFile entry   = { .fd = fd, .path = target };
-            String info_path = string::tformat("/proc/%d/fdinfo/%d", pid, fd);
-            File file        = file::open(info_path, "r")!;
-            defer (void)file.close();
-
-            while (try line = io::treadline(&file)) {
-                line = line.trim();
-                if (!line.starts_with("flags:")) continue;
-                String flags_str = line["flags:".len..].trim();
-
-                if (try int flags = flags_str.to_int(8)) {
-                    entry.mode = flags_to_mode(flags, allocator);
-                } else {
-                    linsys::push_error("openfile::flags", linsys::PARSE_ERROR);
+            if (try String target = readlink_alloc(allocator, fd_path.zstr_tcopy())) {
+                if (!target.starts_with("/") || target.ends_with(" (deleted)")) {
+                    mem::alloc::free(allocator, target);
+                    continue;
                 }
 
-                break;
-            }
+                if (!os::native_file_or_dir_exists(target)) {
+                    linsys::push_error(target, linsys::PATH_NOT_FOUND);
+                    mem::alloc::free(allocator, target);
+                    continue;
+                }
 
-            of.push(entry);
+                OpenFile entry   = { .fd = fd, .path = target };
+                String info_path = string::tformat("/proc/%d/fdinfo/%d", pid, fd);
+                File file        = file::open(info_path, "r")!;
+                defer (void)file.close();
+
+                while (try line = io::treadline(&file)) {
+                    line = line.trim();
+                    if (!line.starts_with("flags:")) continue;
+                    String flags_str = line["flags:".len..].trim();
+
+                    if (try int flags = flags_str.to_int(8)) {
+                        entry.mode = flags_to_mode(flags, allocator);
+                    }
+
+                    break;
+                }
+
+                of.push(entry);
+
+            } else {
+                linsys::push_error("openfile::fd_link", linsys::PARSE_ERROR);
+            }
         }
     };
 
@@ -809,7 +809,7 @@ fn CpuTimes? cpu_times_threads(int pid, int tid) {
 <*
  @require pid > 0 : "pid must be positive"
 *>
-fn ProcessPoller? process_poller_new(int pid) {
+fn ProcessPoller? poller(int pid) {
     return { .pid = pid, .last_snapshot = cpu_snapshot(pid)!, };
 }
 
@@ -957,7 +957,8 @@ struct PidEntry {
 <*
  @require pid > 0 : "pid must be positive"
 *>
-fn int[]? children(Allocator allocator, int pid, bool recursive) {
+fn int[]? children(Allocator allocator, int pid, bool recursive=false) {
+    if (!exists(pid)) return linsys::NO_SUCH_PROCESS~;
     int[] pid_list = list_pids(tmem)!;
 
     List{PidEntry} entries;
@@ -1046,7 +1047,6 @@ fn int? nice_get(int pid) {
  @require value >= -20 && value <= 19 : "nice value must be in range -20..19"
 *>
 fn void? nice_set(int pid, int value) {
-    value = value < -20 ? -20 : (value > 19 ? 19 : value);
     if (libc::setpriority(libc::PRIO_PROCESS, pid, value) != 0) {
         switch (libc::errno()) {
             case ESRCH: return linsys::NICE_NO_SUCH_PROCESS~;
@@ -1207,7 +1207,7 @@ fn Process[]? all_processes(Allocator allocator) {
     defer result.free();
 
     foreach (pid : pids) {
-        if (try Process p = get_proc(allocator, pid)) {
+        if (try Process p = proc(allocator, pid)) {
             result.push(p);
         }
     }
@@ -1224,7 +1224,7 @@ fn Process[]? find_by_name(Allocator allocator, String name) {
     defer result.free();
 
     foreach (pid : pids) {
-        if (try Process p = get_proc(allocator, pid)) {
+        if (try Process p = proc(allocator, pid)) {
             if (p.name == name) {
                 result.push(p);
             } else {

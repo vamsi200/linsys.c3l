@@ -77,15 +77,7 @@ struct CpuTemp {
 fn SystemCpuTimes? cpu_times() {
     File file = file::open("/proc/stat", "r")!;
     defer (void)file.close();
-    String content = linsys::read_file(tmem, file)!;
-
-    String line;
-    if (try sz nl = content.index_of_char('\n')) {
-        line = content[:nl];
-    } else {
-        line = content;
-    }
-
+    String line  = io::treadline(&file)!;
     String[] raw = linsys::split_whitespace(tmem, line);
 
     ulong user, nice, system, idle, iowait, irq, softirq, steal, guest, guest_nice;
@@ -105,6 +97,9 @@ fn SystemCpuTimes? cpu_times() {
         "systemcputimes::guest_nice",
         0
     );
+
+    user -= guest;
+    nice -= guest_nice;
 
     return {
         .user = user,
@@ -140,6 +135,7 @@ fn SystemCpuTimes[]? cpu_times_percpu(Allocator allocator) {
         String[] fields = line.split(tmem, " ");
 
         if (fields.len < 11) {
+            linsys::push_error("systemcputimes::line", linsys::PARSE_ERROR);
             continue;
         }
 
@@ -227,25 +223,21 @@ fn void SystemCpuTimes.free(self, Allocator allocator) => linsys::free_fields(se
 fn SystemCpuSnapshot? cpu_snapshot() {
     File file = file::open("/proc/stat", "r")!;
     defer (void)file.close();
+    String line = io::treadline(&file)!;
 
-    while (try line = io::treadline(&file)) {
-        if (!line.starts_with("cpu ")) {
-            continue;
-        }
-
+    if (line.starts_with("cpu ")) {
         String[] fields = linsys::split_whitespace(tmem, line);
-
-        ulong total = 0;
-        ulong idle  = 0;
+        ulong total     = 0;
+        ulong idle      = 0;
 
         foreach (field : fields[1..]) {
-            total += field.to_ulong() ?? 0;
+            total += field.to_ulong()!;
         }
 
-        if (fields.len > 4) idle = fields[4].to_ulong() ?? 0;
+        if (fields.len > 4) idle = fields[4].to_ulong()!;
 
         // io_wait also included..
-        if (fields.len > 5) idle += fields[5].to_ulong() ?? 0;
+        if (fields.len > 5) idle += fields[5].to_ulong()!;
 
         return { .total = total, .idle = idle, };
     }
@@ -265,7 +257,6 @@ fn SystemCpuSnapshot[]? cpu_snapshot_percpu(Allocator allocator) {
 
     while (try line = io::treadline(&file)) {
         if (!line.starts_with("cpu")) continue;
-
         if (line.starts_with("cpu ")) continue;
 
         String[] fields = linsys::split_whitespace(tmem, line);
@@ -442,10 +433,21 @@ fn CpuFreq[]? cpu_freq_percpu(Allocator allocator) {
                 String min_content = linsys::read_file(tmem, min) ?? "".copy(allocator);
                 String max_content = linsys::read_file(tmem, max) ?? "".copy(allocator);
 
-                freqs.push({ .current = (cur_content.trim()
-                    .to_ulong() ?? 0) / 1000.0, .min = (min_content.trim()
-                        .to_ulong() ?? 0) / 1000.0, .max = (max_content.trim()
-                            .to_ulong() ?? 0) / 1000.0, });
+                ulong cur_val, min_val, max_val;
+                linsys::@try_field(cur_val, (linsys::read_file(tmem, cur) ?? "").trim()
+                    .to_ulong(), "cpufreq::current", 0);
+                linsys::@try_field(min_val, (linsys::read_file(tmem, min) ?? "").trim()
+                    .to_ulong(), "cpufreq::min", 0);
+                linsys::@try_field(max_val, (linsys::read_file(tmem, max) ?? "").trim()
+                    .to_ulong(), "cpufreq::max", 0);
+
+                freqs.push(
+                    {
+                        .current = cur_val / 1000.0,
+                        .min = min_val / 1000.0,
+                        .max = max_val / 1000.0
+                    }
+                );
             }
         }
 
@@ -457,14 +459,10 @@ fn CpuStats? cpu_stats() {
     @pool() {
         File file = file::open("/proc/stat", "r")!;
         defer (void)file.close();
-
-        String content = linsys::read_file(tmem, file)!;
-
         CpuStats stats = { };
 
-        foreach (line : content.split(tmem, "\n")) {
+        while (try line = io::treadline(&file)) {
             String[] fields = linsys::split_whitespace(tmem, line);
-
 
             if (fields.len < 2) {
                 linsys::push_error("cpustats::line", linsys::PARSE_ERROR);
@@ -480,7 +478,12 @@ fn CpuStats? cpu_stats() {
                         0
                     );
                 case "intr":
-                    linsys::@try_field(stats.interrupts, fields[1].to_ulong(), "cpustats::interrupts", 0);
+                    linsys::@try_field(
+                        stats.interrupts,
+                        fields[1].to_ulong(),
+                        "cpustats::interrupts",
+                        0
+                    );
                 case "softirq":
                     linsys::@try_field(
                         stats.soft_interrupts,
@@ -489,7 +492,12 @@ fn CpuStats? cpu_stats() {
                         0
                     );
                 case "syscalls":
-                    linsys::@try_field(stats.syscalls, fields[1].to_ulong(), "cpustats::syscalls", 0);
+                    linsys::@try_field(
+                        stats.syscalls,
+                        fields[1].to_ulong(),
+                        "cpustats::syscalls",
+                        0
+                    );
             }
         }
 
@@ -653,17 +661,13 @@ fn double? uptime() {
 fn String? hostname(Allocator allocator) {
     File file = file::open("/proc/sys/kernel/hostname", "r")!;
     defer (void)file.close();
-    @pool() {
-        return linsys::read_file(tmem, file)!.trim().copy(allocator);
-    };
+    return linsys::read_file(tmem, file)!.trim().copy(allocator);
 }
 
 fn String? kernel_version(Allocator allocator) {
     File file = file::open("/proc/sys/kernel/osrelease", "r")!;
     defer (void)file.close();
-    @pool() {
-        return linsys::read_file(tmem, file)!.trim().copy(allocator);
-    };
+    return linsys::read_file(tmem, file)!.trim().copy(allocator);
 }
 
 fn String? os_release(Allocator allocator) {

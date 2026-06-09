@@ -159,7 +159,7 @@ fn String protocol_file(Protocol proto) @private {
     }
 }
 
-fn Connection[]? net_connections(Allocator allocator, Protocol[] protos = ALL_PROTOCOLS) {
+fn Connection[]? connections(Allocator allocator, Protocol[] protos = ALL_PROTOCOLS) {
     List{Connection} out;
     out.init(allocator);
     defer out.free();
@@ -184,7 +184,7 @@ macro void? NetConnPoller.@poll(&self; @body(conns)) {
     };
 }
 
-fn NetConnPoller? net_conn_poller_new(Allocator allocator, Protocol[] protos = ALL_PROTOCOLS) {
+fn NetConnPoller? poller(Allocator allocator, Protocol[] protos = ALL_PROTOCOLS) {
     NetConnPoller p;
     p.allocator = allocator;
     p.list.init(allocator);
@@ -206,7 +206,7 @@ fn void NetConnPoller.close(&self) {
 }
 
 
-fn NetIoCounters[]? net_io_counters(Allocator allocator) {
+fn NetIoCounters[]? io_counters(Allocator allocator) {
     List{NetIoCounters} list;
     defer list.free();
 
@@ -319,7 +319,7 @@ fn String sockaddr_to_string(Allocator allocator, void* sa) @private {
     }
 }
 
-fn NetIfAddr[]? net_if_addrs(Allocator allocator) {
+fn NetIfAddr[]? interface_addrs(Allocator allocator) {
     IfAddrs* head = null;
     if (getifaddrs(&head) != 0) return linsys::IO_ERROR~;
     defer freeifaddrs(head);
@@ -353,7 +353,7 @@ fn NetIfAddr[]? net_if_addrs(Allocator allocator) {
 fn void NetIfAddr[].free(self, Allocator allocator) => linsys::free_slice(self, allocator);
 fn void NetIfAddr.free(self, Allocator allocator) => linsys::free_fields(self, allocator);
 
-fn NetIfStats[]? net_if_stats(Allocator allocator) {
+fn NetIfStats[]? interface_stats(Allocator allocator) {
     @pool() {
         Path path = path::new(tmem, "/sys/class/net")!;
 

@@ -44,7 +44,7 @@ struct MemoryStats {
     SwapMemory swap;
 }
 
-fn MemoryPoller? memory_poller_new(Allocator allocator) {
+fn MemoryPoller? poller(Allocator allocator) {
     return {
         .meminfo = file::open("/proc/meminfo", "r")!,
         .vmstat = file::open("/proc/vmstat", "r")!,
