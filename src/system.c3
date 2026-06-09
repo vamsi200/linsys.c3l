@@ -88,18 +88,35 @@ fn SystemCpuTimes? cpu_times() {
 
     String[] raw = linsys::split_whitespace(tmem, line);
 
-    // TODO: error here?
+    ulong user, nice, system, idle, iowait, irq, softirq, steal, guest, guest_nice;
+
+    if (raw.len > 1) linsys::@try_field(user, raw[1].to_ulong(), "systemcputimes::user", 0);
+    if (raw.len > 2) linsys::@try_field(nice, raw[2].to_ulong(), "systemcputimes::nice", 0);
+    if (raw.len > 3) linsys::@try_field(system, raw[3].to_ulong(), "systemcputimes::system", 0);
+    if (raw.len > 4) linsys::@try_field(idle, raw[4].to_ulong(), "systemcputimes::idle", 0);
+    if (raw.len > 5) linsys::@try_field(iowait, raw[5].to_ulong(), "systemcputimes::iowait", 0);
+    if (raw.len > 6) linsys::@try_field(irq, raw[6].to_ulong(), "systemcputimes::irq", 0);
+    if (raw.len > 7) linsys::@try_field(softirq, raw[7].to_ulong(), "systemcputimes::softirq", 0);
+    if (raw.len > 8) linsys::@try_field(steal, raw[8].to_ulong(), "systemcputimes::steal", 0);
+    if (raw.len > 9) linsys::@try_field(guest, raw[9].to_ulong(), "systemcputimes::guest", 0);
+    if (raw.len > 10) linsys::@try_field(
+        guest_nice,
+        raw[10].to_ulong(),
+        "systemcputimes::guest_nice",
+        0
+    );
+
     return {
-        .user = raw.len > 1 ? (raw[1].to_ulong() ?? 0) : 0,
-        .nice = raw.len > 2 ? (raw[2].to_ulong() ?? 0) : 0,
-        .system = raw.len > 3 ? (raw[3].to_ulong() ?? 0) : 0,
-        .idle = raw.len > 4 ? (raw[4].to_ulong() ?? 0) : 0,
-        .iowait = raw.len > 5 ? (raw[5].to_ulong() ?? 0) : 0,
-        .irq = raw.len > 6 ? (raw[6].to_ulong() ?? 0) : 0,
-        .softirq = raw.len > 7 ? (raw[7].to_ulong() ?? 0) : 0,
-        .steal = raw.len > 8 ? (raw[8].to_ulong() ?? 0) : 0,
-        .guest = raw.len > 9 ? (raw[9].to_ulong() ?? 0) : 0,
-        .guest_nice = raw.len > 10 ? (raw[10].to_ulong() ?? 0) : 0,
+        .user = user,
+        .nice = nice,
+        .system = system,
+        .idle = idle,
+        .iowait = iowait,
+        .irq = irq,
+        .softirq = softirq,
+        .steal = steal,
+        .guest = guest,
+        .guest_nice = guest_nice,
     };
 }
 
@@ -126,19 +143,77 @@ fn SystemCpuTimes[]? cpu_times_percpu(Allocator allocator) {
             continue;
         }
 
-    // TODO: error here?
+        ulong user, nice, system, idle, iowait, irq, softirq, steal, guest, guest_nice;
+
+        if (fields.len < 4) linsys::push_error("systemcputimes::line", linsys::PARSE_ERROR);
+        if (fields.len > 1) linsys::@try_field(
+            user,
+            fields[1].to_ulong(),
+            "systemcputimes::user",
+            0
+        );
+        if (fields.len > 2) linsys::@try_field(
+            nice,
+            fields[2].to_ulong(),
+            "systemcputimes::nice",
+            0
+        );
+        if (fields.len > 3) linsys::@try_field(
+            system,
+            fields[3].to_ulong(),
+            "systemcputimes::system",
+            0
+        );
+        if (fields.len > 4) linsys::@try_field(
+            idle,
+            fields[4].to_ulong(),
+            "systemcputimes::idle",
+            0
+        );
+        if (fields.len > 5) linsys::@try_field(
+            iowait,
+            fields[5].to_ulong(),
+            "systemcputimes::iowait",
+            0
+        );
+        if (fields.len > 6) linsys::@try_field(irq, fields[6].to_ulong(), "systemcputimes::irq", 0);
+        if (fields.len > 7) linsys::@try_field(
+            softirq,
+            fields[7].to_ulong(),
+            "systemcputimes::softirq",
+            0
+        );
+        if (fields.len > 8) linsys::@try_field(
+            steal,
+            fields[8].to_ulong(),
+            "systemcputimes::steal",
+            0
+        );
+        if (fields.len > 9) linsys::@try_field(
+            guest,
+            fields[9].to_ulong(),
+            "systemcputimes::guest",
+            0
+        );
+        if (fields.len > 10) linsys::@try_field(
+            guest_nice,
+            fields[10].to_ulong(),
+            "systemcputimes::guest_nice",
+            0
+        );
+
         cpus.push(
             {
-                .user = fields.len > 1 ? (fields[1].to_ulong() ?? 0) : 0,
-                .nice = fields.len > 2 ? (fields[2].to_ulong() ?? 0) : 0,
-                .system = fields.len > 3 ? (fields[3].to_ulong() ?? 0) : 0,
-                .idle = fields.len > 4 ? (fields[4].to_ulong() ?? 0) : 0,
-                .iowait = fields.len > 5 ? (fields[5].to_ulong() ?? 0) : 0,
-                .irq = fields.len > 6 ? (fields[6].to_ulong() ?? 0) : 0,
-                .softirq = fields.len > 7 ? (fields[7].to_ulong() ?? 0) : 0,
-                .steal = fields.len > 8 ? (fields[8].to_ulong() ?? 0) : 0,
-                .guest = fields.len > 9 ? (fields[9].to_ulong() ?? 0) : 0,
-                .guest_nice = fields.len > 10 ? (fields[10].to_ulong() ?? 0) : 0,
+                .user = user,
+                .nice = nice,
+                .system = system,
+                .idle = idle,
+                .iowait = iowait,
+                .irq = irq,
+                .softirq = softirq,
+                .steal = steal,
+                .guest = guest,
+                .guest_nice = guest_nice,
             }
         );
     }
@@ -392,21 +467,29 @@ fn CpuStats? cpu_stats() {
 
 
             if (fields.len < 2) {
+                linsys::push_error("cpustats::line", linsys::PARSE_ERROR);
                 continue;
             }
 
             switch (fields[0]) {
                 case "ctxt":
-                    stats.ctx_switches = fields[1].to_ulong() ?? 0;
-
+                    linsys::@try_field(
+                        stats.ctx_switches,
+                        fields[1].to_ulong(),
+                        "cpustats::ctx_switches",
+                        0
+                    );
                 case "intr":
-                    stats.interrupts = fields[1].to_ulong() ?? 0;
-
+                    linsys::@try_field(stats.interrupts, fields[1].to_ulong(), "cpustats::interrupts", 0);
                 case "softirq":
-                    stats.soft_interrupts = fields[1].to_ulong() ?? 0;
-
+                    linsys::@try_field(
+                        stats.soft_interrupts,
+                        fields[1].to_ulong(),
+                        "cpustats::soft_interrupts",
+                        0
+                    );
                 case "syscalls":
-                    stats.syscalls = fields[1].to_ulong() ?? 0;
+                    linsys::@try_field(stats.syscalls, fields[1].to_ulong(), "cpustats::syscalls", 0);
             }
         }
 
@@ -427,11 +510,11 @@ fn LoadAvg? load_avg() {
                 return linsys::PARSE_ERROR~;
             }
 
-            return {
-                .one = fields[0].to_double() ?? 0,
-                .five = fields[1].to_double() ?? 0,
-                .fifteen = fields[2].to_double() ?? 0,
-            };
+            double one, five, fifteen;
+            linsys::@try_field(one, fields[0].to_double(), "loadavg::one", 0);
+            linsys::@try_field(five, fields[1].to_double(), "loadavg::five", 0);
+            linsys::@try_field(fifteen, fields[2].to_double(), "loadavg::fifteen", 0);
+            return { .one = one, .five = five, .fifteen = fifteen };
         }
     };
 
@@ -466,24 +549,17 @@ fn CpuInfo[]? cpu_info(Allocator allocator) {
             switch (key) {
                 case "vendor_id":
                     current.vendor = val.copy(allocator);
-
                 case "model name":
                     current.model = val.copy(allocator);
-
                 case "cpu MHz":
-                    current.mhz = val.to_double() ?? 0;
-
+                    linsys::@try_field(current.mhz, val.to_double(), "cpuinfo::mhz", 0);
                 case "cache size":
                     String size = val.strip_suffix(" KB").trim();
-
-                    current.cache_size = size.to_int() ?? 0;
-
+                    linsys::@try_field(current.cache_size, size.to_int(), "cpuinfo::cache_size", 0);
                 case "cpu cores":
-                    current.cores = val.to_int() ?? 0;
-
+                    linsys::@try_field(current.cores, val.to_int(), "cpuinfo::cores", 0);
                 case "siblings":
-                    current.siblings = val.to_int() ?? 0;
-
+                    linsys::@try_field(current.siblings, val.to_int(), "cpuinfo::siblings", 0);
                 case "flags":
                     current.flags = val.copy(allocator);
             }
@@ -603,4 +679,53 @@ fn String? os_release(Allocator allocator) {
         return val.copy(allocator);
     }
     return linsys::NOT_FOUND~;
+}
+
+macro ulong boot_time() {
+    static ulong cached = 0;
+    if (cached == 0) cached = read_boot_time() ?? 0;
+    return cached;
+}
+
+fn ulong? read_boot_time() @private {
+    File file = file::open("/proc/stat", "r")!;
+    defer (void)file.close();
+
+    ulong btime;
+
+    while (try line = io::treadline(&file)) {
+        if (line.contains("btime")) {
+            String s = line.strip_prefix("btime ");
+            btime = s.to_ulong()!;
+            break;
+        }
+    }
+
+    return btime;
+}
+
+macro ulong clktck() {
+    static ulong cached = 0;
+    if (cached == 0) cached = read_clktck() ?? 100;
+    return cached;
+}
+
+// getconf CLK_TCK
+fn ulong? read_clktck() @private {
+    File file = file::open("/proc/self/auxv", "rb")!;
+    defer (void)file.close();
+    char[4096] buf;
+    sz n = file.read(&buf)!;
+
+    sz i = 0;
+    while (i + 16 <= n) {
+        ulong type, val;
+        mem::copy(&type, &buf[i], 8);
+        mem::copy(&val, &buf[i + 8], 8);
+
+        if (type == 17) return val; // AT_CLKTCK
+        if (type == 0) break; // AT_NULL
+        i += 16;
+    }
+    return 100;
 }

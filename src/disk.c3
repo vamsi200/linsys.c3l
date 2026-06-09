@@ -57,7 +57,7 @@ struct DiskContext {
     Allocator allocator;
 }
 
-fn DiskPartition[]? disk_partitions(Allocator allocator) {
+fn DiskPartition[]? partitions(Allocator allocator) {
     @pool() {
         File file = file::open("/proc/mounts", "r")!;
         defer (void)file.close();
@@ -73,6 +73,7 @@ fn DiskPartition[]? disk_partitions(Allocator allocator) {
 
             String[] fields = linsys::split_whitespace(tmem, line);
             if (fields.len < 4) {
+                linsys::push_error("diskpartition::line", linsys::PARSE_ERROR);
                 continue;
             }
 
@@ -96,7 +97,7 @@ fn void DiskPartition.free(self, Allocator allocator) => linsys::free_fields(sel
 <*
  @require path.len > 0 : "path must not be empty"
 *>
-fn DiskUsage? disk_usage(String path) {
+fn DiskUsage? usage(String path) {
     Statvfs svfs = { };
 
     if (statvfs((ZString)path, &svfs) != 0) {
@@ -157,29 +158,45 @@ fn ulong DiskContext.get_sector_size(&self, String device) {
 
 const int DISKSTATS_MIN_FIELDS = 14; // kernel 2.6+
 
-fn DiskIoCounters? parse_disk_line(
-    Allocator allocator,
-    String[] fields,
-    DiskContext* ctx
-) @private {
+fn DiskIoCounters? parse_line(Allocator allocator, String[] fields, DiskContext* ctx) @private {
     if (fields.len < DISKSTATS_MIN_FIELDS) return linsys::NOT_FOUND~;
     ulong sector_size = ctx.get_sector_size(fields[2]);
 
+    ulong rc  = 0;
+    ulong rmc = 0;
+    ulong rb  = 0;
+    ulong rt  = 0;
+    ulong wc  = 0;
+    ulong wmc = 0;
+    ulong wb  = 0;
+    ulong wt  = 0;
+    ulong bt  = 0;
+
+    linsys::@try_field(rc, fields[3].to_ulong(), "diskiocounters::read_count", 0);
+    linsys::@try_field(rmc, fields[4].to_ulong(), "diskiocounters::read_merged_count", 0);
+    linsys::@try_field(rb, fields[5].to_ulong(), "diskiocounters::read_bytes", 0);
+    linsys::@try_field(rt, fields[6].to_ulong(), "diskiocounters::read_time", 0);
+    linsys::@try_field(wc, fields[7].to_ulong(), "diskiocounters::write_count", 0);
+    linsys::@try_field(wmc, fields[8].to_ulong(), "diskiocounters::write_merged_count", 0);
+    linsys::@try_field(wb, fields[9].to_ulong(), "diskiocounters::write_bytes", 0);
+    linsys::@try_field(wt, fields[10].to_ulong(), "diskiocounters::write_time", 0);
+    linsys::@try_field(bt, fields[12].to_ulong(), "diskiocounters::busy_time", 0);
+
     return {
         .name = fields[2].copy(allocator),
-        .read_count = fields[3].to_ulong() ?? 0,
-        .read_merged_count = fields[4].to_ulong() ?? 0,
-        .read_bytes = (fields[5].to_ulong() ?? 0) * sector_size,
-        .read_time = fields[6].to_ulong() ?? 0,
-        .write_count = fields[7].to_ulong() ?? 0,
-        .write_merged_count = fields[8].to_ulong() ?? 0,
-        .write_bytes = (fields[9].to_ulong() ?? 0) * sector_size,
-        .write_time = fields[10].to_ulong() ?? 0,
-        .busy_time = fields[12].to_ulong() ?? 0,
+        .read_count = rc,
+        .read_merged_count = rmc,
+        .read_bytes = rb,
+        .read_time = rt,
+        .write_count = wc,
+        .write_merged_count = wmc,
+        .write_bytes = wb,
+        .write_time = wt,
+        .busy_time = bt,
     };
 }
 
-fn DiskIoCounters[]? disk_io_counters(Allocator allocator, DiskContext* ctx) {
+fn DiskIoCounters[]? io_counters(Allocator allocator, DiskContext* ctx) {
     @pool() {
         File file = file::open("/proc/diskstats", "r")!;
         defer (void)file.close();
@@ -190,8 +207,10 @@ fn DiskIoCounters[]? disk_io_counters(Allocator allocator, DiskContext* ctx) {
         while (try line = io::treadline(&file)) {
             if (line.len == 0) continue;
             String[] fields = linsys::split_whitespace(tmem, line.trim());
-            if (try disk = parse_disk_line(allocator, fields, ctx)) {
+            if (try disk = parse_line(allocator, fields, ctx)) {
                 disks.push(disk);
+            } else {
+                linsys::push_error("diskiocounters::line", linsys::PARSE_ERROR);
             }
         }
         return disks.to_array(allocator);
@@ -204,7 +223,7 @@ fn void DiskIoCounters.free(self, Allocator allocator) => linsys::free_fields(se
 <*
  @require device.len > 0 : "device name must not be empty"
 *>
-fn DiskIoCounters? disk_io_counters_perdisk(Allocator allocator, String device, DiskContext* ctx) {
+fn DiskIoCounters? io_counters_perdisk(Allocator allocator, String device, DiskContext* ctx) {
     @pool() {
         File file = file::open("/proc/diskstats", "r")!;
         defer (void)file.close();
@@ -212,9 +231,13 @@ fn DiskIoCounters? disk_io_counters_perdisk(Allocator allocator, String device, 
         while (try line = io::treadline(&file)) {
             if (line.len == 0) continue;
             String[] fields = linsys::split_whitespace(tmem, line.trim());
-            if (fields.len < DISKSTATS_MIN_FIELDS) continue;
+            if (fields.len < DISKSTATS_MIN_FIELDS) {
+                linsys::push_error("diskiocounters::line", linsys::PARSE_ERROR);
+                continue;
+            }
+
             if (fields[2] != device) continue;
-            return parse_disk_line(allocator, fields, ctx);
+            return parse_line(allocator, fields, ctx);
         }
     };
 
@@ -228,7 +251,7 @@ struct DiskIoPoller {
     Allocator allocator;
 }
 
-fn DiskIoPoller? disk_io_poller_new(Allocator allocator, DiskContext* ctx) {
+fn DiskIoPoller? io_poller_new(Allocator allocator, DiskContext* ctx) {
     List{DiskIoCounters} list;
     list.init(allocator);
     return {
@@ -251,8 +274,10 @@ macro void? DiskIoPoller.@poll(&self; @body(dio)) {
         while (try line = io::treadline(&self.file)) {
             if (line.len == 0) continue;
             String[] fields = linsys::split_whitespace(tmem, line.trim());
-            if (try disk = parse_disk_line(tmem, fields, self.ctx)) {
+            if (try disk = parse_line(tmem, fields, self.ctx)) {
                 self.list.push(disk);
+            } else {
+                linsys::push_error("diskiopoller::line", linsys::PARSE_ERROR);
             }
         }
         @body(self.list.array_view());
@@ -272,8 +297,10 @@ macro void? DiskIoPoller.@poll_perdisk(&self, String device; @body(dio)) {
             if (fields.len < DISKSTATS_MIN_FIELDS) continue;
             if (fields[2] != device) continue;
             found = true;
-            if (try dio = parse_disk_line(tmem, fields, self.ctx)) {
+            if (try dio = parse_line(tmem, fields, self.ctx)) {
                 @body(dio);
+            } else {
+                linsys::push_error("diskiopoller::line", linsys::PARSE_ERROR);
             }
             if (!found) return linsys::NOT_FOUND~;
         }

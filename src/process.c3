@@ -448,9 +448,7 @@ fn int[]? fds(Allocator allocator, int pid) {
         Path path      = path::new(tmem, proc_fd)!;
         PathList list  = io::path::ls(tmem, path)!;
         foreach (fd : list) {
-            if (try int ifd = fd.file_tbasename().to_int()) {
-                fds.push(ifd);
-            }
+            if (try int ifd = fd.file_tbasename().to_int()) fds.push(ifd);
         }
     };
     defer fds.free();
@@ -475,7 +473,7 @@ fn MemoryMap[]? maps(Allocator allocator, int pid) {
             String[] split = linsys::split_whitespace(tmem, line);
 
             if (split.len < 5) {
-                linsys::push_error("maps", linsys::PARSE_ERROR);
+                linsys::push_error("memorymap::maps", linsys::PARSE_ERROR);
                 continue;
             }
 
@@ -710,57 +708,6 @@ fn Connection[]? connections(Allocator allocator, int pid) {
 fn void Connection[].free(self, Allocator allocator) => linsys::free_slice(self, allocator);
 fn void Connection.free(self, Allocator allocator) => linsys::free_fields(self, allocator);
 
-macro ulong boot_time() {
-    static ulong cached = 0;
-    if (cached == 0) cached = read_boot_time() ?? 0;
-    return cached;
-}
-
-fn ulong? read_boot_time() {
-    File file = file::open("/proc/stat", "r")!;
-    defer (void)file.close();
-
-    ulong btime;
-
-    while (try line = io::treadline(&file)) {
-        if (line.contains("btime")) {
-            String s = line.strip_prefix("btime ");
-
-            if (try ulong bt = s.to_ulong()) {
-                btime = bt;
-            }
-        }
-    }
-
-    return btime;
-}
-
-macro ulong clktck() {
-    static ulong cached = 0;
-    if (cached == 0) cached = read_clktck() ?? 100;
-    return cached;
-}
-
-// getconf CLK_TCK
-fn ulong? read_clktck() @private {
-    File file = file::open("/proc/self/auxv", "rb")!;
-    defer (void)file.close();
-    char[4096] buf;
-    sz n = file.read(&buf)!;
-
-    sz i = 0;
-    while (i + 16 <= n) {
-        ulong type, val;
-        mem::copy(&type, &buf[i], 8);
-        mem::copy(&val, &buf[i + 8], 8);
-
-        if (type == 17) return val; // AT_CLKTCK
-        if (type == 0) break; // AT_NULL
-        i += 16;
-    }
-    return 100;
-}
-
 <*
  @require pid > 0 : "pid must be positive"
 *>
@@ -777,8 +724,8 @@ fn double? create_time(int pid) {
 
     if (fields.len < 20) return linsys::PARSE_ERROR~;
     if (try ulong val = fields[19].to_ulong()) {
-        ulong btime = boot_time();
-        ulong clk   = clktck();
+        ulong btime = system::boot_time();
+        ulong clk   = system::clktck();
         start_time = (double)btime + ((double)val / (double)clk);
     }
 
@@ -813,7 +760,7 @@ fn CpuTimes? cpu_times_parse(String path) @private {
     String[] fields = parse_proc_stat_fields(tmem, raw)!;
 
     if (fields.len > 14) {
-        double clk = clktck();
+        double clk = system::clktck();
 
         if (try double utime = fields[11].to_double()) {
             cpu.user = utime / clk;
@@ -887,7 +834,7 @@ fn bool ProcessPoller.exists(&self) => exists(self.pid);
 *>
 fn CpuSnapshot? cpu_snapshot(int pid) {
     CpuTimes times = cpu_times(pid)!;
-    ulong total    = read_total_cpu_time()!;
+    ulong total    = linsys::read_total_cpu_time()!;
     return { times.user + times.system, total };
 }
 
@@ -896,7 +843,7 @@ fn CpuSnapshot? cpu_snapshot(int pid) {
 *>
 fn double? cpu_percent_from(CpuSnapshot first, int pid) {
     CpuTimes times     = cpu_times(pid)!;
-    ulong total2       = read_total_cpu_time()!;
+    ulong total2       = linsys::read_total_cpu_time()!;
     double delta       = (times.user + times.system) - first.proc_time;
     double total_delta = (double)(total2 - first.total_time);
     if (total_delta <= 0) return 0.0;
@@ -911,27 +858,6 @@ fn double? cpu_percent(int pid, double interval) {
     CpuSnapshot snap = cpu_snapshot(pid)!;
     thread::sleep_ms((long)(interval * 1000));
     return cpu_percent_from(snap, pid);
-}
-
-fn ulong? read_total_cpu_time() {
-    File file = file::open("/proc/stat", "r")!;
-    defer (void)file.close();
-
-    String line = linsys::read_file(tmem, file)!;
-
-    sz i = line.index_of("cpu ")!;
-    if (i == -1) return 0;
-
-    String[] split = linsys::split_whitespace(tmem, line[(i + 4)..].trim());
-
-    if (split.len < 8) return 0;
-
-    return split[0].to_ulong()! + split[1].to_ulong()! + split[2].to_ulong()!
-        + split[3].to_ulong()!
-        + split[4].to_ulong()!
-        + split[5].to_ulong()!
-        + split[6].to_ulong()!
-        + split[7].to_ulong()!;
 }
 
 fn ulong? parse_proc_ulong(String path, String key) @private {
@@ -1053,7 +979,10 @@ fn int[]? children(Allocator allocator, int pid, bool recursive) {
             String after    = stat[end_comm + 2..];
             String[] fields = linsys::split_whitespace(tmem, after);
 
-            if (fields.len < 2) continue;
+            if (fields.len < 2) {
+                linsys::push_error("children::fields", linsys::PARSE_ERROR);
+                continue;
+            }
             int ppid = fields[1].to_int()!;
 
             entries.push({ p, ppid });
@@ -1092,7 +1021,7 @@ fn int? parent(int pid) {
         sz n            = file.read(&buf)!;
         String stat     = (String)buf[:n];
         String[] fields = parse_proc_stat_fields(tmem, stat)!;
-        if (fields.len < 2) return 0;
+        if (fields.len < 2) return linsys::PARSE_ERROR~;
         return fields[1].to_int()!;
     };
 }
@@ -1210,9 +1139,19 @@ fn RLimitEntry[]? rlimits_get(Allocator allocator, int pid) {
                 continue;
             }
 
-            // TODO: add error here?
-            ulong soft = filtered[1] == "unlimited" ? ulong::max : (filtered[1].to_ulong() ?? 0);
-            ulong hard = filtered[2] == "unlimited" ? ulong::max : (filtered[2].to_ulong() ?? 0);
+            ulong soft;
+            ulong hard;
+
+            if (filtered[1] == "unlimited") {
+                soft = ulong::max;
+            } else {
+                linsys::@try_field(soft, filtered[1].to_ulong(), "limit::soft", 0);
+            }
+            if (filtered[2] == "unlimited") {
+                hard = ulong::max;
+            } else {
+                linsys::@try_field(hard, filtered[2].to_ulong(), "limit::hard", 0);
+            }
 
             entries.push(
                 { .name = filtered[0].copy(allocator), .limit = { .soft = soft, .hard = hard } }
@@ -1253,6 +1192,8 @@ fn ThreadInfo[]? threads(Allocator allocator, int pid) {
                         }
                     }
                 );
+            } else {
+                linsys::push_error("threadinfo::line", linsys::PARSE_ERROR);
             }
         }
         return ti.to_array(allocator);

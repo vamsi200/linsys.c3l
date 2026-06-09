@@ -152,3 +152,25 @@ fn ulong? read_ulong_file(String path)  @private {
 
     return io::treadline(&file)!.trim().to_ulong();
 }
+
+fn ulong? read_total_cpu_time() @private{
+    File file = file::open("/proc/stat", "r")!;
+    defer (void)file.close();
+
+    String line = linsys::read_file(tmem, file)!;
+
+    sz i = line.index_of("cpu ")!;
+    if (i == -1) return 0;
+
+    String[] split = linsys::split_whitespace(tmem, line[(i + 4)..].trim());
+
+    if (split.len < 8) return 0;
+
+    return split[0].to_ulong()! + split[1].to_ulong()! + split[2].to_ulong()!
+        + split[3].to_ulong()!
+        + split[4].to_ulong()!
+        + split[5].to_ulong()!
+        + split[6].to_ulong()!
+        + split[7].to_ulong()!;
+}
+

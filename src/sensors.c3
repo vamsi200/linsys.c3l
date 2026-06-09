@@ -295,12 +295,33 @@ fn SensorBattery[]? sensor_battery(Allocator allocator) {
                 bat.status = battery_status(io::treadline(&sf)!.trim());
             }
 
-            bat.percent = (double)(linsys::read_ulong_file(
-                string::tformat("%s/capacity", base)
-            ) ?? 0);
-            bat.energy_now = linsys::read_ulong_file(string::tformat("%s/energy_now", base)) ?? 0;
-            bat.energy_full = linsys::read_ulong_file(string::tformat("%s/energy_full", base)) ?? 0;
-            bat.power_now = linsys::read_ulong_file(string::tformat("%s/power_now", base)) ?? 0;
+            ulong capacity;
+            linsys::@try_field(
+                capacity,
+                linsys::read_ulong_file(string::tformat("%s/capacity", base)),
+                "sensor_battery::percent",
+                0
+            );
+            linsys::@try_field(
+                bat.energy_now,
+                linsys::read_ulong_file(string::tformat("%s/energy_now", base)),
+                "sensor_battery::energy_now",
+                0
+            );
+            linsys::@try_field(
+                bat.energy_full,
+                linsys::read_ulong_file(string::tformat("%s/energy_full", base)),
+                "sensor_battery::energy_full",
+                0
+            );
+            linsys::@try_field(
+                bat.power_now,
+                linsys::read_ulong_file(string::tformat("%s/power_now", base)),
+                "sensor_battery::power_now",
+                0
+            );
+            bat.percent = (double)capacity;
+
 
             if (bat.power_now > 0 && bat.energy_now > 0) {
                 bat.secs_left = ((long)((double)bat.energy_now / (double)bat.power_now)) * 3600;
