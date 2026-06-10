@@ -143,7 +143,7 @@ fn String[] split_whitespace(Allocator allocator, String s)  @private {
     foreach (word : s.split(allocator, " ")) {
         if (word.len > 0) parts.push(word);
     }
-    return parts.to_array(allocator);
+    return parts.array_view();
 }
 
 fn ulong? read_ulong_file(String path)  @private {
@@ -154,23 +154,24 @@ fn ulong? read_ulong_file(String path)  @private {
 }
 
 fn ulong? read_total_cpu_time() @private{
-    File file = file::open("/proc/stat", "r")!;
-    defer (void)file.close();
+    @pool(){
+	File file = file::open("/proc/stat", "r")!;
+	defer (void)file.close();
 
-    String line = linsys::read_file(tmem, file)!;
+    	String line = linsys::read_file(tmem, file)!;
 
-    sz i = line.index_of("cpu ")!;
-    if (i == -1) return 0;
+	sz i = line.index_of("cpu ")!;
+	if (i == -1) return 0;
 
-    String[] split = linsys::split_whitespace(tmem, line[(i + 4)..].trim());
+	String[] split = linsys::split_whitespace(tmem, line[(i + 4)..].trim());
 
-    if (split.len < 8) return 0;
+	if (split.len < 8) return 0;
 
-    return split[0].to_ulong()! + split[1].to_ulong()! + split[2].to_ulong()!
-        + split[3].to_ulong()!
-        + split[4].to_ulong()!
-        + split[5].to_ulong()!
-        + split[6].to_ulong()!
-        + split[7].to_ulong()!;
+	return split[0].to_ulong()! + split[1].to_ulong()! + split[2].to_ulong()!
+		+ split[3].to_ulong()!
+		+ split[4].to_ulong()!
+		+ split[5].to_ulong()!
+		+ split[6].to_ulong()!
+		+ split[7].to_ulong()!;
+   };
 }
-

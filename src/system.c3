@@ -75,204 +75,222 @@ struct CpuTemp {
 }
 
 fn SystemCpuTimes? cpu_times() {
-    File file = file::open("/proc/stat", "r")!;
-    defer (void)file.close();
-    String line  = io::treadline(&file)!;
-    String[] raw = linsys::split_whitespace(tmem, line);
-
-    ulong user, nice, system, idle, iowait, irq, softirq, steal, guest, guest_nice;
-
-    if (raw.len > 1) linsys::@try_field(user, raw[1].to_ulong(), "systemcputimes::user", 0);
-    if (raw.len > 2) linsys::@try_field(nice, raw[2].to_ulong(), "systemcputimes::nice", 0);
-    if (raw.len > 3) linsys::@try_field(system, raw[3].to_ulong(), "systemcputimes::system", 0);
-    if (raw.len > 4) linsys::@try_field(idle, raw[4].to_ulong(), "systemcputimes::idle", 0);
-    if (raw.len > 5) linsys::@try_field(iowait, raw[5].to_ulong(), "systemcputimes::iowait", 0);
-    if (raw.len > 6) linsys::@try_field(irq, raw[6].to_ulong(), "systemcputimes::irq", 0);
-    if (raw.len > 7) linsys::@try_field(softirq, raw[7].to_ulong(), "systemcputimes::softirq", 0);
-    if (raw.len > 8) linsys::@try_field(steal, raw[8].to_ulong(), "systemcputimes::steal", 0);
-    if (raw.len > 9) linsys::@try_field(guest, raw[9].to_ulong(), "systemcputimes::guest", 0);
-    if (raw.len > 10) linsys::@try_field(
-        guest_nice,
-        raw[10].to_ulong(),
-        "systemcputimes::guest_nice",
-        0
-    );
-
-    user -= guest;
-    nice -= guest_nice;
-
-    return {
-        .user = user,
-        .nice = nice,
-        .system = system,
-        .idle = idle,
-        .iowait = iowait,
-        .irq = irq,
-        .softirq = softirq,
-        .steal = steal,
-        .guest = guest,
-        .guest_nice = guest_nice,
-    };
-}
-
-fn SystemCpuTimes[]? cpu_times_percpu(Allocator allocator) {
-    File file = file::open("/proc/stat", "r")!;
-    defer (void)file.close();
-
-    List{SystemCpuTimes} cpus;
-    cpus.init(allocator);
-    defer cpus.free();
-
-    while (try line = io::treadline(&file)) {
-        if (!line.starts_with("cpu")) {
-            continue;
-        }
-
-        if (line.starts_with("cpu ")) {
-            continue;
-        }
-
-        String[] fields = line.split(tmem, " ");
-
-        if (fields.len < 11) {
-            linsys::push_error("systemcputimes::line", linsys::PARSE_ERROR);
-            continue;
-        }
+    @pool() {
+        File file = file::open("/proc/stat", "r")!;
+        defer (void)file.close();
+        String line  = io::treadline(&file)!;
+        String[] raw = linsys::split_whitespace(tmem, line);
 
         ulong user, nice, system, idle, iowait, irq, softirq, steal, guest, guest_nice;
 
-        if (fields.len < 4) linsys::push_error("systemcputimes::line", linsys::PARSE_ERROR);
-        if (fields.len > 1) linsys::@try_field(
-            user,
-            fields[1].to_ulong(),
-            "systemcputimes::user",
-            0
-        );
-        if (fields.len > 2) linsys::@try_field(
-            nice,
-            fields[2].to_ulong(),
-            "systemcputimes::nice",
-            0
-        );
-        if (fields.len > 3) linsys::@try_field(
-            system,
-            fields[3].to_ulong(),
-            "systemcputimes::system",
-            0
-        );
-        if (fields.len > 4) linsys::@try_field(
-            idle,
-            fields[4].to_ulong(),
-            "systemcputimes::idle",
-            0
-        );
-        if (fields.len > 5) linsys::@try_field(
-            iowait,
-            fields[5].to_ulong(),
-            "systemcputimes::iowait",
-            0
-        );
-        if (fields.len > 6) linsys::@try_field(irq, fields[6].to_ulong(), "systemcputimes::irq", 0);
-        if (fields.len > 7) linsys::@try_field(
+        if (raw.len > 1) linsys::@try_field(user, raw[1].to_ulong(), "systemcputimes::user", 0);
+        if (raw.len > 2) linsys::@try_field(nice, raw[2].to_ulong(), "systemcputimes::nice", 0);
+        if (raw.len > 3) linsys::@try_field(system, raw[3].to_ulong(), "systemcputimes::system", 0);
+        if (raw.len > 4) linsys::@try_field(idle, raw[4].to_ulong(), "systemcputimes::idle", 0);
+        if (raw.len > 5) linsys::@try_field(iowait, raw[5].to_ulong(), "systemcputimes::iowait", 0);
+        if (raw.len > 6) linsys::@try_field(irq, raw[6].to_ulong(), "systemcputimes::irq", 0);
+        if (raw.len > 7) linsys::@try_field(
             softirq,
-            fields[7].to_ulong(),
+            raw[7].to_ulong(),
             "systemcputimes::softirq",
             0
         );
-        if (fields.len > 8) linsys::@try_field(
-            steal,
-            fields[8].to_ulong(),
-            "systemcputimes::steal",
-            0
-        );
-        if (fields.len > 9) linsys::@try_field(
-            guest,
-            fields[9].to_ulong(),
-            "systemcputimes::guest",
-            0
-        );
-        if (fields.len > 10) linsys::@try_field(
+        if (raw.len > 8) linsys::@try_field(steal, raw[8].to_ulong(), "systemcputimes::steal", 0);
+        if (raw.len > 9) linsys::@try_field(guest, raw[9].to_ulong(), "systemcputimes::guest", 0);
+        if (raw.len > 10) linsys::@try_field(
             guest_nice,
-            fields[10].to_ulong(),
+            raw[10].to_ulong(),
             "systemcputimes::guest_nice",
             0
         );
 
-        cpus.push(
-            {
-                .user = user,
-                .nice = nice,
-                .system = system,
-                .idle = idle,
-                .iowait = iowait,
-                .irq = irq,
-                .softirq = softirq,
-                .steal = steal,
-                .guest = guest,
-                .guest_nice = guest_nice,
-            }
-        );
-    }
+        user -= guest;
+        nice -= guest_nice;
 
-    return cpus.to_array(allocator);
+        return {
+            .user = user,
+            .nice = nice,
+            .system = system,
+            .idle = idle,
+            .iowait = iowait,
+            .irq = irq,
+            .softirq = softirq,
+            .steal = steal,
+            .guest = guest,
+            .guest_nice = guest_nice,
+        };
+    };
+}
+
+fn SystemCpuTimes[]? cpu_times_percpu(Allocator allocator) {
+    @pool() {
+        File file = file::open("/proc/stat", "r")!;
+        defer (void)file.close();
+
+        List{SystemCpuTimes} cpus;
+        cpus.init(allocator);
+        defer cpus.free();
+
+        while (try line = io::treadline(&file)) {
+            if (!line.starts_with("cpu")) {
+                continue;
+            }
+
+            if (line.starts_with("cpu ")) {
+                continue;
+            }
+
+            String[] fields = line.split(tmem, " ");
+
+            if (fields.len < 11) {
+                linsys::push_error("systemcputimes::line", linsys::PARSE_ERROR);
+                continue;
+            }
+
+            ulong user, nice, system, idle, iowait, irq, softirq, steal, guest, guest_nice;
+
+            if (fields.len < 4) linsys::push_error("systemcputimes::line", linsys::PARSE_ERROR);
+            if (fields.len > 1) linsys::@try_field(
+                user,
+                fields[1].to_ulong(),
+                "systemcputimes::user",
+                0
+            );
+            if (fields.len > 2) linsys::@try_field(
+                nice,
+                fields[2].to_ulong(),
+                "systemcputimes::nice",
+                0
+            );
+            if (fields.len > 3) linsys::@try_field(
+                system,
+                fields[3].to_ulong(),
+                "systemcputimes::system",
+                0
+            );
+            if (fields.len > 4) linsys::@try_field(
+                idle,
+                fields[4].to_ulong(),
+                "systemcputimes::idle",
+                0
+            );
+            if (fields.len > 5) linsys::@try_field(
+                iowait,
+                fields[5].to_ulong(),
+                "systemcputimes::iowait",
+                0
+            );
+            if (fields.len > 6) linsys::@try_field(
+                irq,
+                fields[6].to_ulong(),
+                "systemcputimes::irq",
+                0
+            );
+            if (fields.len > 7) linsys::@try_field(
+                softirq,
+                fields[7].to_ulong(),
+                "systemcputimes::softirq",
+                0
+            );
+            if (fields.len > 8) linsys::@try_field(
+                steal,
+                fields[8].to_ulong(),
+                "systemcputimes::steal",
+                0
+            );
+            if (fields.len > 9) linsys::@try_field(
+                guest,
+                fields[9].to_ulong(),
+                "systemcputimes::guest",
+                0
+            );
+            if (fields.len > 10) linsys::@try_field(
+                guest_nice,
+                fields[10].to_ulong(),
+                "systemcputimes::guest_nice",
+                0
+            );
+
+            cpus.push(
+                {
+                    .user = user,
+                    .nice = nice,
+                    .system = system,
+                    .idle = idle,
+                    .iowait = iowait,
+                    .irq = irq,
+                    .softirq = softirq,
+                    .steal = steal,
+                    .guest = guest,
+                    .guest_nice = guest_nice,
+                }
+            );
+        }
+
+        return cpus.to_array(allocator);
+    };
 }
 
 fn void SystemCpuTimes[].free(self, Allocator allocator) => linsys::free_slice(self, allocator);
 fn void SystemCpuTimes.free(self, Allocator allocator) => linsys::free_fields(self, allocator);
 
 fn SystemCpuSnapshot? cpu_snapshot() {
-    File file = file::open("/proc/stat", "r")!;
-    defer (void)file.close();
-    String line = io::treadline(&file)!;
+    @pool() {
+        File file = file::open("/proc/stat", "r")!;
+        defer (void)file.close();
+        String line = io::treadline(&file)!;
 
-    if (line.starts_with("cpu ")) {
-        String[] fields = linsys::split_whitespace(tmem, line);
-        ulong total     = 0;
-        ulong idle      = 0;
+        if (line.starts_with("cpu ")) {
+            String[] fields = linsys::split_whitespace(tmem, line);
+            ulong total     = 0;
+            ulong idle      = 0;
 
-        foreach (field : fields[1..]) {
-            total += field.to_ulong()!;
+            foreach (field : fields[1..]) {
+                total += field.to_ulong()!;
+            }
+
+            if (fields.len > 4) idle = fields[4].to_ulong()!;
+
+            // io_wait also included..
+            if (fields.len > 5) idle += fields[5].to_ulong()!;
+
+            return { .total = total, .idle = idle, };
         }
 
-        if (fields.len > 4) idle = fields[4].to_ulong()!;
-
-        // io_wait also included..
-        if (fields.len > 5) idle += fields[5].to_ulong()!;
-
-        return { .total = total, .idle = idle, };
-    }
-
-    return linsys::PARSE_ERROR~;
+        return linsys::PARSE_ERROR~;
+    };
 }
 
 fn SystemCpuSnapshot[]? cpu_snapshot_percpu(Allocator allocator) {
-    File file = file::open("/proc/stat", "r")!;
-    defer (void)file.close();
-    List{SystemCpuSnapshot} cs;
-    cs.init(allocator);
-    defer cs.free();
+    @pool() {
+        File file = file::open("/proc/stat", "r")!;
+        defer (void)file.close();
+        List{SystemCpuSnapshot} cs;
+        cs.init(allocator);
+        defer cs.free();
 
-    ulong total = 0;
-    ulong idle  = 0;
+        ulong total = 0;
+        ulong idle  = 0;
 
-    while (try line = io::treadline(&file)) {
-        if (!line.starts_with("cpu")) continue;
-        if (line.starts_with("cpu ")) continue;
+        while (try line = io::treadline(&file)) {
+            if (!line.starts_with("cpu")) continue;
+            if (line.starts_with("cpu ")) continue;
 
-        String[] fields = linsys::split_whitespace(tmem, line);
+            String[] fields = linsys::split_whitespace(tmem, line);
 
-        foreach (field : fields[1..]) {
-            total += field.to_ulong() ?? 0;
+            foreach (field : fields[1..]) {
+                total += field.to_ulong() ?? 0;
+            }
+
+            if (fields.len > 4) idle = fields[4].to_ulong() ?? 0;
+
+            if (fields.len > 5) idle += fields[5].to_ulong() ?? 0;
+
+            cs.push({ .total = total, .idle = idle });
         }
 
-        if (fields.len > 4) idle = fields[4].to_ulong() ?? 0;
-
-        if (fields.len > 5) idle += fields[5].to_ulong() ?? 0;
-
-        cs.push({ .total = total, .idle = idle });
-    }
-
-    return cs.to_array(allocator);
+        return cs.to_array(allocator);
+    };
 }
 
 fn void SystemCpuSnapshot[].free(self, Allocator allocator) => linsys::free_slice(self, allocator);
@@ -650,12 +668,14 @@ fn CpuUsage cpu_usage(SystemCpuTimes old, SystemCpuTimes new) {
 }
 
 fn double? uptime() {
-    File file = file::open("/proc/uptime", "r")!;
-    defer (void)file.close();
-    String content  = linsys::read_file(tmem, file)!;
-    String[] fields = linsys::split_whitespace(tmem, content.trim());
-    if (fields.len < 1) return linsys::NOT_FOUND~;
-    return fields[0].to_double();
+    @pool() {
+        File file = file::open("/proc/uptime", "r")!;
+        defer (void)file.close();
+        String content  = linsys::read_file(tmem, file)!;
+        String[] fields = linsys::split_whitespace(tmem, content.trim());
+        if (fields.len < 1) return linsys::NOT_FOUND~;
+        return fields[0].to_double();
+    };
 }
 
 fn String? hostname(Allocator allocator) {
@@ -694,7 +714,6 @@ macro ulong boot_time() {
 fn ulong? read_boot_time() @private {
     File file = file::open("/proc/stat", "r")!;
     defer (void)file.close();
-
     ulong btime;
 
     while (try line = io::treadline(&file)) {

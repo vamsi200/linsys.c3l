@@ -9,8 +9,8 @@ const ushort AF_INET6   = 10;
 const uint IFF_UP       = 0x1;
 const uint IFF_LOOPBACK = 0x8;
 
-extern fn CInt getifaddrs(IfAddrs** ifap);
-extern fn void freeifaddrs(IfAddrs* ifa);
+extern fn CInt getifaddrs(IfAddrs** ifap) @private;
+extern fn void freeifaddrs(IfAddrs* ifa) @private;
 
 struct NetIoCounters {
     String name;
@@ -81,55 +81,67 @@ struct NetConnPoller {
 }
 
 fn NetIoCounters? parse_net_io_line(Allocator allocator, String line) @private {
-    sz? idx = line.index_of_char(':');
-    if (catch idx) return linsys::PARSE_ERROR~;
+    @pool() {
+        sz? idx = line.index_of_char(':');
+        if (catch idx) return linsys::PARSE_ERROR~;
 
-    String iface = line[:idx].trim();
+        String iface = line[:idx].trim();
 
-    String[] fields = linsys::split_whitespace(tmem, line[idx + 1..].trim());
+        String[] fields = linsys::split_whitespace(tmem, line[idx + 1..].trim());
 
-    ulong bytes_recv, packets_recv, errin, dropin;
-    ulong bytes_sent, packets_sent, errout, dropout;
+        ulong bytes_recv, packets_recv, errin, dropin;
+        ulong bytes_sent, packets_sent, errout, dropout;
 
-    if (fields.len > 0) linsys::@try_field(
-        bytes_recv,
-        fields[0].to_ulong(),
-        "netiface::bytes_recv",
-        0
-    );
-    if (fields.len > 1) linsys::@try_field(
-        packets_recv,
-        fields[1].to_ulong(),
-        "netiface::packets_recv",
-        0
-    );
-    if (fields.len > 2) linsys::@try_field(errin, fields[2].to_ulong(), "netiface::errin", 0);
-    if (fields.len > 3) linsys::@try_field(dropin, fields[3].to_ulong(), "netiface::dropin", 0);
-    if (fields.len > 8) linsys::@try_field(
-        bytes_sent,
-        fields[8].to_ulong(),
-        "netiface::bytes_sent",
-        0
-    );
-    if (fields.len > 9) linsys::@try_field(
-        packets_sent,
-        fields[9].to_ulong(),
-        "netiface::packets_sent",
-        0
-    );
-    if (fields.len > 10) linsys::@try_field(errout, fields[10].to_ulong(), "netiface::errout", 0);
-    if (fields.len > 11) linsys::@try_field(dropout, fields[11].to_ulong(), "netiface::dropout", 0);
+        if (fields.len > 0) linsys::@try_field(
+            bytes_recv,
+            fields[0].to_ulong(),
+            "netiface::bytes_recv",
+            0
+        );
+        if (fields.len > 1) linsys::@try_field(
+            packets_recv,
+            fields[1].to_ulong(),
+            "netiface::packets_recv",
+            0
+        );
+        if (fields.len > 2) linsys::@try_field(errin, fields[2].to_ulong(), "netiface::errin", 0);
+        if (fields.len > 3) linsys::@try_field(dropin, fields[3].to_ulong(), "netiface::dropin", 0);
+        if (fields.len > 8) linsys::@try_field(
+            bytes_sent,
+            fields[8].to_ulong(),
+            "netiface::bytes_sent",
+            0
+        );
+        if (fields.len > 9) linsys::@try_field(
+            packets_sent,
+            fields[9].to_ulong(),
+            "netiface::packets_sent",
+            0
+        );
+        if (fields.len > 10) linsys::@try_field(
+            errout,
+            fields[10].to_ulong(),
+            "netiface::errout",
+            0
+        );
+        if (fields.len > 11) linsys::@try_field(
+            dropout,
+            fields[11].to_ulong(),
+            "netiface::dropout",
+            0
+        );
 
-    return {
-        .name = iface.copy(allocator),
-        .bytes_recv = bytes_recv,
-        .packets_recv = packets_recv,
-        .errin = errin,
-        .dropin = dropin,
-        .bytes_sent = bytes_sent,
-        .packets_sent = packets_sent,
-        .errout = errout,
-        .dropout = dropout,
+        return {
+            .name = iface.copy(allocator),
+            .bytes_recv = bytes_recv,
+            .packets_recv = packets_recv,
+            .errin = errin,
+            .dropin = dropin,
+            .bytes_sent = bytes_sent,
+            .packets_sent = packets_sent,
+            .errout = errout,
+            .dropout = dropout,
+        };
     };
 }
 
@@ -255,7 +267,12 @@ fn void? read_system_connections(
             ushort lport;
             ushort rport;
             linsys::@try_field(lport, (ushort)local_port.to_long(16), "connection::local_port", 0);
-            linsys::@try_field(rport, (ushort)remote_port.to_long(16), "connection::remote_port", 0);
+            linsys::@try_field(
+                rport,
+                (ushort)remote_port.to_long(16),
+                "connection::remote_port",
+                0
+            );
 
             out.push(
                 {
