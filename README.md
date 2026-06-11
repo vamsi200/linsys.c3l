@@ -1,6 +1,6 @@
 # linsys.c3l
 
-A simple Linux system and process introspection library for C3.
+A Linux system and process introspection library written in C3.
 
 `linsys.c3l` provides APIs for querying system state, inspecting processes and monitoring resources.
 
@@ -25,7 +25,7 @@ Functions returning structs will often return partially populated values instead
 Example:
 
 ```c
-ProcessInfo pi = get_info(tmem, pid) ?? {};
+ProcessInfo pi = info(tmem, pid) ?? {};
 ```
 Some fields inside `ProcessInfo` may be just empty if specific information could not be read, while the overall call still succeeds.
 
@@ -35,7 +35,7 @@ If you need detailed errors, you can enable error collection like this:
 ```c
 linsys::init_errors(&alloc);
 
-ProcessInfo pi = process::get_info(&alloc, pid) ?? {};
+ProcessInfo pi = process::info(&alloc, pid) ?? {};
 
 foreach (e : *linsys::list_errors()) {
     io::printfn("field '%s' failed: %s", e.field, e.f); // f is here a "fault"
@@ -97,7 +97,7 @@ poller.@poll(; DiskIoCounters[] disks) {
     }
 }!!;
 ```
-use `c3c docgen` for more.
+Additional pollers are available for processes, memory, network connections etc.. use `c3c docgen` for more.
 
 ### Process Information
 
@@ -106,14 +106,14 @@ import linsys;
 import std::io;
 
 fn int main(String[] args) {
-        LibcAllocator alloc;
-        ProcessInfo pi = process::info(&alloc, 1) ?? {};
-        defer pi.free(&alloc);
-        io::printn(pi);
+    LibcAllocator alloc;
+    ProcessInfo pi = process::info(&alloc, 1) ?? {};
+    defer pi.free(&alloc);
+    io::printn(pi);
     return 0;
 }
 ```
-> Note: Most structers returned using an allocator own memory and provide a free() method. Arrays of these structs follow the same.
+> Note: When using an allocator, the caller owns the returned memory and is responsible for calling free() (most strutures support free() method on it).
 
 
 Output:
@@ -163,7 +163,7 @@ Output:
 { total: 501859205120, used: 448485535744, free: 53373669376, percent: 89.364812 }
 ```
 
-# API Reference (could change)
+# API Reference
 Get the api's using:
 
 ```bash
