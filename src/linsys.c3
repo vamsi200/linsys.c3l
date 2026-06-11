@@ -153,8 +153,7 @@ fn ulong? read_ulong_file(String path)  @private {
     return io::treadline(&file)!.trim().to_ulong();
 }
 
-fn ulong? read_total_cpu_time() @private{
-    @pool(){
+fn ulong? read_total_cpu_time() @private => @pool() {
 	File file = file::open("/proc/stat", "r")!;
 	defer (void)file.close();
 
@@ -173,5 +172,4 @@ fn ulong? read_total_cpu_time() @private{
 		+ split[5].to_ulong()!
 		+ split[6].to_ulong()!
 		+ split[7].to_ulong()!;
-   };
 }

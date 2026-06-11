@@ -79,65 +79,59 @@ fn void? parse_sensor_temperatures(
     }
 }
 
-fn SensorPath[]? get_sensor_paths(Allocator allocator) @private {
-    @pool() {
-        Path path     = path::new(tmem, "/sys/class/hwmon")!;
-        PathList list = io::path::ls(tmem, path)!;
-        List{SensorPath} paths;
-        paths.init(allocator);
-        defer paths.free();
+fn SensorPath[]? get_sensor_paths(Allocator allocator) @private => @pool() {
+    Path path     = path::new(tmem, "/sys/class/hwmon")!;
+    PathList list = io::path::ls(tmem, path)!;
+    List{SensorPath} paths;
+    paths.init(allocator);
+    defer paths.free();
 
-        foreach (entry : list) {
-            String hwmon     = entry.file_tbasename()!;
-            String base      = string::tformat("/sys/class/hwmon/%s", hwmon);
-            String name_path = string::tformat("%s/name", base);
-            String sensor_name;
+    foreach (entry : list) {
+        String hwmon     = entry.file_tbasename()!;
+        String base      = string::tformat("/sys/class/hwmon/%s", hwmon);
+        String name_path = string::tformat("%s/name", base);
+        String sensor_name;
 
-            if (try File nf = file::open(name_path, "r")) {
-                defer (void)nf.close();
-                sensor_name = io::treadline(&nf)!.trim().copy(allocator);
-            } else {
-                sensor_name = hwmon.copy(allocator);
-            }
-
-            defer mem::alloc::free(allocator, sensor_name);
-
-            for (int i = 1; i <= 32; i++) {
-                String input = string::tformat("%s/temp%d_input", base, i);
-                ulong? raw   = linsys::read_ulong_file(input);
-                if (catch raw) {
-                    linsys::push_error("sensorpath::line", linsys::PARSE_ERROR);
-                    continue;
-                }
-
-                paths.push(
-                    {
-                        .input = input.copy(allocator),
-                        .crit = string::tformat("%s/temp%d_crit", base, i)
-                    .copy(
-                        allocator
-                    ), .name = string::format(allocator, "%s-temp%d", sensor_name, i), });
-            }
+        if (try File nf = file::open(name_path, "r")) {
+            defer (void)nf.close();
+            sensor_name = io::treadline(&nf)!.trim().copy(allocator);
+        } else {
+            sensor_name = hwmon.copy(allocator);
         }
-        return paths.to_array(allocator);
-    };
+
+        defer mem::alloc::free(allocator, sensor_name);
+
+        for (int i = 1; i <= 32; i++) {
+            String input = string::tformat("%s/temp%d_input", base, i);
+            ulong? raw   = linsys::read_ulong_file(input);
+            if (catch raw) {
+                linsys::push_error("sensorpath::line", linsys::PARSE_ERROR);
+                continue;
+            }
+
+            paths.push(
+                { .input = input.copy(allocator), .crit = string::tformat("%s/temp%d_crit", base, i)
+                .copy(
+                    allocator
+                ), .name = string::format(allocator, "%s-temp%d", sensor_name, i), });
+        }
+    }
+    return paths.to_array(allocator);
 }
 
 fn void SensorPath[].free(self, Allocator allocator) => linsys::free_slice(self, allocator);
 fn void SensorPath.free(self, Allocator allocator) => linsys::free_fields(self, allocator);
 
-fn SensorTemperature[]? temperatures(Allocator allocator) {
-    @pool() {
-        SensorPath[] paths = get_sensor_paths(allocator)!;
-        linsys::free_slice(paths, allocator);
+fn SensorTemperature[]? temperatures(Allocator allocator) => @pool() {
+    SensorPath[] paths = get_sensor_paths(allocator)!;
+    linsys::free_slice(paths, allocator);
 
-        List{SensorTemperature} out;
-        out.init(allocator);
-        defer out.free();
+    List{SensorTemperature} out;
+    out.init(allocator);
+    defer out.free();
 
-        parse_sensor_temperatures(allocator, paths, &out)!;
-        return out.to_array(allocator);
-    };
+    parse_sensor_temperatures(allocator, paths, &out)!;
+    return out.to_array(allocator);
 }
 
 fn void SensorTemperature[].free(self, Allocator allocator) => linsys::free_slice(self, allocator);
@@ -171,46 +165,44 @@ struct FanPath @private {
     String name;
 }
 
-fn FanPath[]? find_fan_paths(Allocator allocator) @private {
-    @pool() {
-        Path path     = path::new(tmem, "/sys/class/hwmon")!;
-        PathList list = io::path::ls(tmem, path)!;
-        List{FanPath} paths;
-        paths.init(allocator);
-        defer paths.free();
+fn FanPath[]? find_fan_paths(Allocator allocator) @private => @pool() {
+    Path path     = path::new(tmem, "/sys/class/hwmon")!;
+    PathList list = io::path::ls(tmem, path)!;
+    List{FanPath} paths;
+    paths.init(allocator);
+    defer paths.free();
 
-        foreach (entry : list) {
-            String hwmon     = entry.file_tbasename()!;
-            String base      = string::tformat("/sys/class/hwmon/%s", hwmon);
-            String name_path = string::tformat("%s/name", base);
-            String sensor_name;
-            if (try File nf = file::open(name_path, "r")) {
-                defer (void)nf.close();
-                sensor_name = io::treadline(&nf)!.trim().copy(allocator);
-            } else {
-                sensor_name = hwmon.copy(allocator);
-            }
-
-            defer mem::alloc::free(allocator, sensor_name);
-
-            for (int i = 1; i <= 32; i++) {
-                String input = string::tformat("%s/fan%d_input", base, i);
-                ulong? raw   = linsys::read_ulong_file(input);
-                if (catch raw) {
-                    linsys::push_error("fanpath::line", linsys::PARSE_ERROR);
-                    continue;
-                }
-
-                paths.push(
-                    {
-                        .input = input.copy(allocator),
-                        .name = string::format(allocator, "%s-fan%d", sensor_name, i),
-                    }
-                );
-            }
+    foreach (entry : list) {
+        String hwmon     = entry.file_tbasename()!;
+        String base      = string::tformat("/sys/class/hwmon/%s", hwmon);
+        String name_path = string::tformat("%s/name", base);
+        String sensor_name;
+        if (try File nf = file::open(name_path, "r")) {
+            defer (void)nf.close();
+            sensor_name = io::treadline(&nf)!.trim().copy(allocator);
+        } else {
+            sensor_name = hwmon.copy(allocator);
         }
-        return paths.to_array(allocator);
-    };
+
+        defer mem::alloc::free(allocator, sensor_name);
+
+        for (int i = 1; i <= 32; i++) {
+            String input = string::tformat("%s/fan%d_input", base, i);
+            ulong? raw   = linsys::read_ulong_file(input);
+            if (catch raw) {
+                linsys::push_error("fanpath::line", linsys::PARSE_ERROR);
+                continue;
+            }
+
+            paths.push(
+                {
+                    .input = input.copy(allocator),
+                    .name = string::format(allocator, "%s-fan%d", sensor_name, i),
+                }
+            );
+        }
+    }
+    return paths.to_array(allocator);
 }
 
 fn void? parse_sensor_fans(Allocator allocator, FanPath[] paths, List{SensorFan}* out) @private {
@@ -226,17 +218,15 @@ fn void? parse_sensor_fans(Allocator allocator, FanPath[] paths, List{SensorFan}
 
 fn void FanPath.free(self, Allocator allocator) => linsys::free_fields(self, allocator);
 
-fn SensorFan[]? fans(Allocator allocator) {
-    @pool() {
-        FanPath[] paths = find_fan_paths(allocator)!;
-        linsys::free_slice(paths, allocator);
+fn SensorFan[]? fans(Allocator allocator) => @pool() {
+    FanPath[] paths = find_fan_paths(allocator)!;
+    linsys::free_slice(paths, allocator);
 
-        List{SensorFan} out;
-        out.init(allocator);
-        defer out.free();
-        parse_sensor_fans(allocator, paths, &out)!;
-        return out.to_array(allocator);
-    };
+    List{SensorFan} out;
+    out.init(allocator);
+    defer out.free();
+    parse_sensor_fans(allocator, paths, &out)!;
+    return out.to_array(allocator);
 }
 
 fn void SensorFan[].free(self, Allocator allocator) => linsys::free_slice(self, allocator);

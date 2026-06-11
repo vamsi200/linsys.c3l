@@ -135,74 +135,67 @@ struct ProcessPoller {
 <*
  @require pid > 0 : "pid must be positive"
 *>
-fn ProcessInfo? info(Allocator allocator, int pid) {
+fn ProcessInfo? info(Allocator allocator, int pid) => @pool() {
     ProcessInfo proc = { };
     Process p        = { };
 
-    @pool() {
-        String path = string::tformat("/proc/%d/status", pid);
-        File file   = file::open(path, "r")!;
-        defer (void)file.close();
+    String path = string::tformat("/proc/%d/status", pid);
+    File file   = file::open(path, "r")!;
+    defer (void)file.close();
 
-        while (try line = io::treadline(&file)) {
-            sz? idx = line.index_of_char(':');
-            if (catch idx) continue;
-            if (idx == -1) continue;
+    while (try line = io::treadline(&file)) {
+        sz? idx = line.index_of_char(':');
+        if (catch idx) continue;
+        if (idx == -1) continue;
 
-            String key   = line[:idx].trim();
-            String data  = line[idx + 1..].trim();
-            String first = data.trim();
+        String key   = line[:idx].trim();
+        String data  = line[idx + 1..].trim();
+        String first = data.trim();
 
-            switch (key) {
-                case "Threads":
-                    linsys::@try_field(proc.threads, data.to_int(), "processinfo::threads", 0);
+        switch (key) {
+            case "Threads":
+                linsys::@try_field(proc.threads, data.to_int(), "processinfo::threads", 0);
 
-                case "Uid":
-                    if (try long uid_idx = first.index_of_char('\t')) {
-                        first = uid_idx == -1 ? first : first[:uid_idx];
-                        linsys::@try_field(proc.uid, first.to_int(), "processinfo::uid", 0);
-                    }
+            case "Uid":
+                if (try long uid_idx = first.index_of_char('\t')) {
+                    first = uid_idx == -1 ? first : first[:uid_idx];
+                    linsys::@try_field(proc.uid, first.to_int(), "processinfo::uid", 0);
+                }
 
-                case "Gid":
-                    if (try long gid_idx = first.index_of_char('\t')) {
-                        first = gid_idx == -1 ? first : first[:gid_idx];
-                        linsys::@try_field(proc.gid, first.to_int(), "processinfo::gid", 0);
-                    }
+            case "Gid":
+                if (try long gid_idx = first.index_of_char('\t')) {
+                    first = gid_idx == -1 ? first : first[:gid_idx];
+                    linsys::@try_field(proc.gid, first.to_int(), "processinfo::gid", 0);
+                }
 
-                case "Pid":
-                    linsys::@try_field(p.pid, data.to_int(), "processinfo::pid", 0);
+            case "Pid":
+                linsys::@try_field(p.pid, data.to_int(), "processinfo::pid", 0);
 
-                case "PPid":
-                    linsys::@try_field(p.ppid, data.to_int(), "processinfo::ppid", 0);
+            case "PPid":
+                linsys::@try_field(p.ppid, data.to_int(), "processinfo::ppid", 0);
 
-                case "Name":
-                    p.name = data.copy(allocator);
+            case "Name":
+                p.name = data.copy(allocator);
 
-                case "VmSize":
-                    if (try long vms_idx = first.index_of_char(' ')) {
-                        first = vms_idx == -1 ? first : first[:vms_idx];
-                        linsys::@try_field(
-                            proc.vm_size,
-                            first.to_ulong(),
-                            "processinfo::vmsize",
-                            0
-                        );
-                    }
+            case "VmSize":
+                if (try long vms_idx = first.index_of_char(' ')) {
+                    first = vms_idx == -1 ? first : first[:vms_idx];
+                    linsys::@try_field(proc.vm_size, first.to_ulong(), "processinfo::vmsize", 0);
+                }
 
-                case "VmRSS":
-                    if (try long vmrss_idx = first.index_of_char(' ')) {
-                        first = vmrss_idx == -1 ? first : first[:vmrss_idx];
-                        linsys::@try_field(proc.vm_rss, first.to_ulong(), "processinfo::vmrss", 0);
-                    }
+            case "VmRSS":
+                if (try long vmrss_idx = first.index_of_char(' ')) {
+                    first = vmrss_idx == -1 ? first : first[:vmrss_idx];
+                    linsys::@try_field(proc.vm_rss, first.to_ulong(), "processinfo::vmrss", 0);
+                }
 
-                case "State":
-                    p.state = proc_state((char)data[0]);
+            case "State":
+                p.state = proc_state((char)data[0]);
 
-                default:
-                    continue;
-            }
+            default:
+                continue;
         }
-    };
+    }
 
     linsys::@try_field(proc.exe_path, read_exe(allocator, pid), "exe", "".copy(allocator));
     linsys::@try_field(proc.cmdline, read_cmdline(allocator, pid), "cmdline", "".copy(allocator));
@@ -236,40 +229,38 @@ fn ProcState proc_state(char c) @private {
 <*
  @require pid > 0 : "pid must be positive"
 *>
-fn Process? proc(Allocator allocator, int pid) {
+fn Process? proc(Allocator allocator, int pid) => @pool() {
     Process p;
 
-    @pool() {
-        String path = string::tformat("/proc/%d/status", pid);
-        File file   = file::open(path, "r")!;
-        defer (void)file.close();
+    String path = string::tformat("/proc/%d/status", pid);
+    File file   = file::open(path, "r")!;
+    defer (void)file.close();
 
-        while (try line = io::treadline(&file)) {
-            long? idx = line.index_of_char(':');
-            if (catch err = idx) continue;
-            if (idx == -1) continue;
+    while (try line = io::treadline(&file)) {
+        long? idx = line.index_of_char(':');
+        if (catch err = idx) continue;
+        if (idx == -1) continue;
 
-            String key  = line[:idx].trim();
-            String data = line[idx + 1..].trim();
+        String key  = line[:idx].trim();
+        String data = line[idx + 1..].trim();
 
-            switch (key) {
-                case "Pid":
-                    linsys::@try_field(p.pid, data.to_int(), "process::pid", 0);
+        switch (key) {
+            case "Pid":
+                linsys::@try_field(p.pid, data.to_int(), "process::pid", 0);
 
-                case "PPid":
-                    linsys::@try_field(p.ppid, data.to_int(), "process::ppid", 0);
+            case "PPid":
+                linsys::@try_field(p.ppid, data.to_int(), "process::ppid", 0);
 
-                case "Name":
-                    p.name = data.copy(allocator);
+            case "Name":
+                p.name = data.copy(allocator);
 
-                case "State":
-                    p.state = proc_state((char)data[0]);
+            case "State":
+                p.state = proc_state((char)data[0]);
 
-                default:
-                    continue;
-            }
+            default:
+                continue;
         }
-    };
+    }
 
     return p;
 }
@@ -323,19 +314,17 @@ fn String? read_exe(Allocator allocator, int pid) {
     return readlink_alloc(allocator, path.zstr_tcopy());
 }
 
-fn int[]? list_pids(Allocator allocator) {
+fn int[]? list_pids(Allocator allocator) => @pool() {
     List{int} pids;
 
     pids.init(allocator);
-    @pool() {
-        Path p        = io::path::new(tmem, "/proc")!;
-        PathList list = io::path::ls(tmem, p)!;
-        foreach (l : list) {
-            if (try int pid = l.file_tbasename().to_int()) {
-                pids.push(pid);
-            }
+    Path p        = io::path::new(tmem, "/proc")!;
+    PathList list = io::path::ls(tmem, p)!;
+    foreach (l : list) {
+        if (try int pid = l.file_tbasename().to_int()) {
+            pids.push(pid);
         }
-    };
+    }
     defer pids.free();
     return pids.to_array(allocator);
 }
@@ -343,11 +332,9 @@ fn int[]? list_pids(Allocator allocator) {
 <*
  @require pid > 0 : "pid must be positive"
 *>
-fn bool exists(int pid) {
-    @pool() {
-        String path = string::tformat("/proc/%d", pid);
-        return os::native_file_or_dir_exists(path);
-    };
+fn bool exists(int pid) => @pool() {
+    String path = string::tformat("/proc/%d", pid);
+    return os::native_file_or_dir_exists(path);
 }
 
 <*
@@ -370,27 +357,25 @@ fn String? cwd(Allocator allocator, int pid) {
 <*
  @require pid > 0 : "pid must be positive"
 *>
-fn EnvVar[]? environ(Allocator allocator, int pid) {
-    @pool() {
-        String path = string::tformat("/proc/%d/environ", pid);
-        File file   = file::open(path, "r")!;
-        defer (void)file.close();
-        String content = linsys::read_file(tmem, file)!;
-        String[] s     = content.split(tmem, "\0");
-        List{EnvVar} ev;
-        ev.init(allocator);
+fn EnvVar[]? environ(Allocator allocator, int pid) => @pool() {
+    String path = string::tformat("/proc/%d/environ", pid);
+    File file   = file::open(path, "r")!;
+    defer (void)file.close();
+    String content = linsys::read_file(tmem, file)!;
+    String[] s     = content.split(tmem, "\0");
+    List{EnvVar} ev;
+    ev.init(allocator);
 
-        foreach (line : s) {
-            long? idx = line.index_of_char('=');
-            if (catch idx) continue;
-            if (idx == -1) continue;
-            ev.push({ .key = line[:idx].trim()
-                .copy(allocator), .value = line[idx + 1..].trim().copy(allocator) });
-        }
+    foreach (line : s) {
+        long? idx = line.index_of_char('=');
+        if (catch idx) continue;
+        if (idx == -1) continue;
+        ev.push({ .key = line[:idx].trim()
+            .copy(allocator), .value = line[idx + 1..].trim().copy(allocator) });
+    }
 
-        defer ev.free();
-        return ev.to_array(allocator);
-    };
+    defer ev.free();
+    return ev.to_array(allocator);
 }
 
 fn void EnvVar[].free(self, Allocator allocator) => linsys::free_slice(self, allocator);
@@ -422,22 +407,20 @@ fn String? environ_get(Allocator allocator, int pid, String key) {
 <*
  @require pid > 0 : "pid must be positive"
 *>
-fn String[]? fd_paths(Allocator allocator, int pid) {
+fn String[]? fd_paths(Allocator allocator, int pid) => @pool() {
     List{String} fds;
     fds.init(allocator);
 
-    @pool() {
-        String proc_fd = string::tformat("/proc/%d/fd", pid);
-        Path path      = path::new(tmem, proc_fd)!;
-        PathList list  = io::path::ls(tmem, path)!;
+    String proc_fd = string::tformat("/proc/%d/fd", pid);
+    Path path      = path::new(tmem, proc_fd)!;
+    PathList list  = io::path::ls(tmem, path)!;
 
-        foreach (l : list) {
-            String full = string::tformat("%s/%s", proc_fd, l.file_tbasename()!);
-            if (try String target = readlink_alloc(allocator, full.zstr_tcopy())) {
-                fds.push(target);
-            }
+    foreach (l : list) {
+        String full = string::tformat("%s/%s", proc_fd, l.file_tbasename()!);
+        if (try String target = readlink_alloc(allocator, full.zstr_tcopy())) {
+            fds.push(target);
         }
-    };
+    }
 
     defer fds.free();
     return fds.to_array(allocator);
@@ -446,18 +429,16 @@ fn String[]? fd_paths(Allocator allocator, int pid) {
 <*
  @require pid > 0 : "pid must be positive"
 *>
-fn int[]? fds(Allocator allocator, int pid) {
+fn int[]? fds(Allocator allocator, int pid) => @pool() {
     List{int} fds;
     fds.init(allocator);
 
-    @pool() {
-        String proc_fd = string::tformat("/proc/%d/fd", pid);
-        Path path      = path::new(tmem, proc_fd)!;
-        PathList list  = io::path::ls(tmem, path)!;
-        foreach (fd : list) {
-            if (try int ifd = fd.file_tbasename().to_int()) fds.push(ifd);
-        }
-    };
+    String proc_fd = string::tformat("/proc/%d/fd", pid);
+    Path path      = path::new(tmem, proc_fd)!;
+    PathList list  = io::path::ls(tmem, path)!;
+    foreach (fd : list) {
+        if (try int ifd = fd.file_tbasename().to_int()) fds.push(ifd);
+    }
     defer fds.free();
     return fds.to_array(allocator);
 }
@@ -465,37 +446,34 @@ fn int[]? fds(Allocator allocator, int pid) {
 <*
  @require pid > 0 : "pid must be positive"
 *>
-fn MemoryMap[]? maps(Allocator allocator, int pid) {
+fn MemoryMap[]? maps(Allocator allocator, int pid) => @pool() {
     List{MemoryMap} mm;
     mm.init(allocator);
 
-    @pool() {
-        String p  = string::tformat("/proc/%d/maps", pid);
-        File file = file::open(p, "r")!;
-        defer (void)file.close();
+    String p  = string::tformat("/proc/%d/maps", pid);
+    File file = file::open(p, "r")!;
+    defer (void)file.close();
 
-        while (try line = io::treadline(&file)) {
-            if (line.len == 0) continue;
-            String[] split = linsys::split_whitespace(tmem, line);
+    while (try line = io::treadline(&file)) {
+        if (line.len == 0) continue;
+        String[] split = linsys::split_whitespace(tmem, line);
 
-            if (split.len < 5) {
-                linsys::push_error("memorymap::maps", linsys::PARSE_ERROR);
-                continue;
-            }
-
-            MemoryMap entry;
-            entry.address_range = split[0].copy(allocator);
-            mem::copy(&entry.perms, split[1].ptr, math::min(split[1].len, entry.perms.len));
-            mem::copy(&entry.device, split[3].ptr, math::min(split[3].len, entry.device.len));
-
-            linsys::@try_field(entry.offset, split[2].to_long(), "memorymap::offset", 0);
-            linsys::@try_field(entry.inode, split[4].to_long(), "memorymap::inode", 0);
-
-            if (split.len > 5) entry.pathname = string::tjoin(split[5..], " ").trim()
-                .copy(allocator);
-            mm.push(entry);
+        if (split.len < 5) {
+            linsys::push_error("memorymap::maps", linsys::PARSE_ERROR);
+            continue;
         }
-    };
+
+        MemoryMap entry;
+        entry.address_range = split[0].copy(allocator);
+        mem::copy(&entry.perms, split[1].ptr, math::min(split[1].len, entry.perms.len));
+        mem::copy(&entry.device, split[3].ptr, math::min(split[3].len, entry.device.len));
+
+        linsys::@try_field(entry.offset, split[2].to_long(), "memorymap::offset", 0);
+        linsys::@try_field(entry.inode, split[4].to_long(), "memorymap::inode", 0);
+
+        if (split.len > 5) entry.pathname = string::tjoin(split[5..], " ").trim().copy(allocator);
+        mm.push(entry);
+    }
 
     defer mm.free();
     return mm.to_array(allocator);
@@ -509,96 +487,92 @@ struct FlagInfo {
     String name;
 }
 
-fn String flags_to_mode(int flags, Allocator allocator) @private {
-    @pool() {
-        String access;
+fn String flags_to_mode(int flags, Allocator allocator) @private => @pool() {
+    String access;
 
-        switch (flags & 3) {
-            case 0: access = "r";
-            case 1: access = "w";
-            case 2: access = "rw";
-            default: access = "?";
+    switch (flags & 3) {
+        case 0: access = "r";
+        case 1: access = "w";
+        case 2: access = "rw";
+        default: access = "?";
+    }
+
+    FlagInfo[*] infos = {
+        { 0o02000, "append" }, // O_APPEND
+        { 0o04000, "nonblock" }, // O_NONBLOCK
+        { 0o010000, "dsync" }, // O_DSYNC
+        { 0o020000, "async" }, // O_ASYNC
+        { 0o040000, "direct" }, // O_DIRECT
+        { 0o100000, "largefile" }, // O_LARGEFILE
+        { 0o1000000, "noatime" }, // O_NOATIME
+        { 0o2000000, "cloexec" }, // O_CLOEXEC
+        };
+
+    DString result = dstring::new_with_capacity(tmem, 32);
+
+    result.append(access);
+
+    foreach (info : infos) {
+        if (flags & info.flag) {
+            result.append_char('+');
+            result.append(info.name);
         }
+    }
 
-        FlagInfo[*] infos = {
-            { 0o02000, "append" }, // O_APPEND
-            { 0o04000, "nonblock" }, // O_NONBLOCK
-            { 0o010000, "dsync" }, // O_DSYNC
-            { 0o020000, "async" }, // O_ASYNC
-            { 0o040000, "direct" }, // O_DIRECT
-            { 0o100000, "largefile" }, // O_LARGEFILE
-            { 0o1000000, "noatime" }, // O_NOATIME
-            { 0o2000000, "cloexec" }, // O_CLOEXEC
-            };
-
-        DString result = dstring::new_with_capacity(tmem, 32);
-
-        result.append(access);
-
-        foreach (info : infos) {
-            if (flags & info.flag) {
-                result.append_char('+');
-                result.append(info.name);
-            }
-        }
-
-        return result.copy_str(allocator);
-    };
+    return result.copy_str(allocator);
 }
 
 <*
  @require pid > 0 : "pid must be positive"
 *>
-fn OpenFile[]? open_files(Allocator allocator, int pid) {
+fn OpenFile[]? open_files(Allocator allocator, int pid) => @pool() {
     List{OpenFile} of;
     of.init(allocator);
 
-    @pool() {
-        int[] fd_list = fds(tmem, pid)!;
+    int[] fd_list = fds(tmem, pid)!;
 
-        foreach (fd : fd_list) {
-            String fd_path = string::tformat("/proc/%d/fd/%d", pid, fd);
+    foreach (fd : fd_list) {
+        String fd_path = string::tformat("/proc/%d/fd/%d", pid, fd);
 
-            if (!os::native_file_or_dir_exists(fd_path)) {
-                linsys::push_error(fd_path, linsys::PATH_NOT_FOUND);
+        if (!os::native_file_or_dir_exists(fd_path)) {
+            linsys::push_error(fd_path, linsys::PATH_NOT_FOUND);
+            continue;
+        }
+
+        if (try String target = readlink_alloc(allocator, fd_path.zstr_tcopy())) {
+            if (!target.starts_with("/") || target.ends_with(" (deleted)")) {
+                mem::alloc::free(allocator, target);
                 continue;
             }
 
-            if (try String target = readlink_alloc(allocator, fd_path.zstr_tcopy())) {
-                if (!target.starts_with("/") || target.ends_with(" (deleted)")) {
-                    mem::alloc::free(allocator, target);
-                    continue;
-                }
-
-                if (!os::native_file_or_dir_exists(target)) {
-                    linsys::push_error(target, linsys::PATH_NOT_FOUND);
-                    mem::alloc::free(allocator, target);
-                    continue;
-                }
-
-                OpenFile entry   = { .fd = fd, .path = target };
-                String info_path = string::tformat("/proc/%d/fdinfo/%d", pid, fd);
-                File file        = file::open(info_path, "r")!;
-                defer (void)file.close();
-
-                while (try line = io::treadline(&file)) {
-                    line = line.trim();
-                    if (!line.starts_with("flags:")) continue;
-                    String flags_str = line["flags:".len..].trim();
-
-                    if (try int flags = flags_str.to_int(8)) {
-                        entry.mode = flags_to_mode(flags, allocator);
-                    }
-
-                    break;
-                }
-
-                of.push(entry);
-            } else {
-                linsys::push_error("openfile::fd_link", linsys::PARSE_ERROR);
+            if (!os::native_file_or_dir_exists(target)) {
+                linsys::push_error(target, linsys::PATH_NOT_FOUND);
+                mem::alloc::free(allocator, target);
+                continue;
             }
+
+            OpenFile entry   = { .fd = fd, .path = target };
+            String info_path = string::tformat("/proc/%d/fdinfo/%d", pid, fd);
+            File file        = file::open(info_path, "r")!;
+            defer (void)file.close();
+
+            while (try line = io::treadline(&file)) {
+                line = line.trim();
+                if (!line.starts_with("flags:")) continue;
+                String flags_str = line["flags:".len..].trim();
+
+                if (try int flags = flags_str.to_int(8)) {
+                    entry.mode = flags_to_mode(flags, allocator);
+                }
+
+                break;
+            }
+
+            of.push(entry);
+        } else {
+            linsys::push_error("openfile::fd_link", linsys::PARSE_ERROR);
         }
-    };
+    }
 
     defer of.free();
     return of.to_array(allocator);
@@ -613,87 +587,85 @@ fn void? read_connections(
     int pid,
     Protocol proto,
     List{Connection}* out
-) @private {
-    @pool() {
-        String filename;
+) @private => @pool() {
+    String filename;
 
-        switch (proto) {
-            case TCP: filename = "tcp";
-            case UDP: filename = "udp";
-            case TCP6: filename = "tcp6";
-            case UDP6: filename = "udp6";
+    switch (proto) {
+        case TCP: filename = "tcp";
+        case UDP: filename = "udp";
+        case TCP6: filename = "tcp6";
+        case UDP6: filename = "udp6";
+    }
+
+    String path = string::tformat("/proc/%d/net/%s", pid, filename);
+
+    if (!os::native_file_or_dir_exists(path)) {
+        linsys::push_error(path, linsys::PATH_NOT_FOUND);
+        return;
+    }
+
+    File file = file::open(path, "r")!;
+    defer (void)file.close();
+    String content = linsys::read_file(tmem, file)!;
+    bool is_v6     = proto == Protocol.TCP6 || proto == Protocol.UDP6;
+    ushort lp      = 0;
+    ushort rp      = 0;
+
+    foreach (i, line : content.split(tmem, "\n")) {
+        if (i == 0 || line.len == 0) continue;
+        String[] raw = linsys::split_whitespace(tmem, line.trim());
+
+        usz n = 0;
+        foreach (f : raw) {
+            if (f.len > 0) raw[n++] = f;
         }
 
-        String path = string::tformat("/proc/%d/net/%s", pid, filename);
-
-        if (!os::native_file_or_dir_exists(path)) {
-            linsys::push_error(path, linsys::PATH_NOT_FOUND);
-            return;
+        if (n < 4) {
+            linsys::push_error("connection::line", linsys::PARSE_ERROR);
+            continue;
         }
 
-        File file = file::open(path, "r")!;
-        defer (void)file.close();
-        String content = linsys::read_file(tmem, file)!;
-        bool is_v6     = proto == Protocol.TCP6 || proto == Protocol.UDP6;
-        ushort lp      = 0;
-        ushort rp      = 0;
-
-        foreach (i, line : content.split(tmem, "\n")) {
-            if (i == 0 || line.len == 0) continue;
-            String[] raw = linsys::split_whitespace(tmem, line.trim());
-
-            usz n = 0;
-            foreach (f : raw) {
-                if (f.len > 0) raw[n++] = f;
-            }
-
-            if (n < 4) {
-                linsys::push_error("connection::line", linsys::PARSE_ERROR);
-                continue;
-            }
-
-            sz? colon_l = raw[1].index_of_char(':');
-            sz? colon_r = raw[2].index_of_char(':');
-            if (catch colon_l) {
-                linsys::push_error("connection::local_addr", linsys::PARSE_ERROR);
-                continue;
-            }
-            if (catch colon_r) {
-                linsys::push_error("connection::remote_addr", linsys::PARSE_ERROR);
-                continue;
-            }
-
-            linsys::@try_field(
-                lp,
-                (ushort)(raw[1][colon_l + 1..].to_long(16)),
-                "connection::local_port",
-                0
-            );
-            linsys::@try_field(
-                rp,
-                (ushort)(raw[2][colon_l + 1..].to_long(16)),
-                "connection::remote_port",
-                0
-            );
-
-            out.push(
-                {
-                    .local_addr = is_v6 ? linsys::ip_to_string_v6(
-                        allocator,
-                        linsys::parse_addr6(raw[1][:colon_l])
-                    ) : linsys::ip_to_string(allocator, linsys::parse_addr(raw[1][:colon_l])),
-                    .remote_addr = is_v6 ? linsys::ip_to_string_v6(
-                        allocator,
-                        linsys::parse_addr6(raw[2][:colon_r])
-                    ) : linsys::ip_to_string(allocator, linsys::parse_addr(raw[2][:colon_r])),
-                    .local_port = lp,
-                    .remote_port = rp,
-                    .state = linsys::tcp_state(raw[3]),
-                    .protocol = proto,
-                }
-            );
+        sz? colon_l = raw[1].index_of_char(':');
+        sz? colon_r = raw[2].index_of_char(':');
+        if (catch colon_l) {
+            linsys::push_error("connection::local_addr", linsys::PARSE_ERROR);
+            continue;
         }
-    };
+        if (catch colon_r) {
+            linsys::push_error("connection::remote_addr", linsys::PARSE_ERROR);
+            continue;
+        }
+
+        linsys::@try_field(
+            lp,
+            (ushort)(raw[1][colon_l + 1..].to_long(16)),
+            "connection::local_port",
+            0
+        );
+        linsys::@try_field(
+            rp,
+            (ushort)(raw[2][colon_l + 1..].to_long(16)),
+            "connection::remote_port",
+            0
+        );
+
+        out.push(
+            {
+                .local_addr = is_v6 ? linsys::ip_to_string_v6(
+                    allocator,
+                    linsys::parse_addr6(raw[1][:colon_l])
+                ) : linsys::ip_to_string(allocator, linsys::parse_addr(raw[1][:colon_l])),
+                .remote_addr = is_v6 ? linsys::ip_to_string_v6(
+                    allocator,
+                    linsys::parse_addr6(raw[2][:colon_r])
+                ) : linsys::ip_to_string(allocator, linsys::parse_addr(raw[2][:colon_r])),
+                .local_port = lp,
+                .remote_port = rp,
+                .state = linsys::tcp_state(raw[3]),
+                .protocol = proto,
+            }
+        );
+    }
 }
 
 <*
@@ -718,108 +690,98 @@ fn void Connection.free(self, Allocator allocator) => linsys::free_fields(self, 
 <*
  @require pid > 0 : "pid must be positive"
 *>
-fn double? create_time(int pid) {
-    @pool() {
-        String p  = string::tformat("/proc/%d/stat", pid);
-        File file = file::open(p, "r")!;
-        defer (void)file.close();
+fn double? create_time(int pid) => @pool() {
+    String p  = string::tformat("/proc/%d/stat", pid);
+    File file = file::open(p, "r")!;
+    defer (void)file.close();
 
-        double start_time;
-        String raw      = linsys::read_file(tmem, file)!;
-        sz rp           = raw.rindex_of(")")!;
-        String after    = raw[(rp + 2)..];
-        String[] fields = parse_proc_stat_fields(tmem, raw)!;
+    double start_time;
+    String raw      = linsys::read_file(tmem, file)!;
+    sz rp           = raw.rindex_of(")")!;
+    String after    = raw[(rp + 2)..];
+    String[] fields = parse_proc_stat_fields(tmem, raw)!;
 
-        if (fields.len < 20) return linsys::PARSE_ERROR~;
-        if (try ulong val = fields[19].to_ulong()) {
-            ulong btime = system::boot_time();
-            ulong clk   = system::clktck();
-            start_time = (double)btime + ((double)val / (double)clk);
-        }
+    if (fields.len < 20) return linsys::PARSE_ERROR~;
+    if (try ulong val = fields[19].to_ulong()) {
+        ulong btime = system::boot_time();
+        ulong clk   = system::clktck();
+        start_time = (double)btime + ((double)val / (double)clk);
+    }
 
-        return start_time;
-    };
+    return start_time;
 }
 
-fn String[]? parse_proc_stat_fields(Allocator allocator, String raw) @private {
-    @pool() {
-        sz rp = raw.rindex_of(")")!;
+fn String[]? parse_proc_stat_fields(Allocator allocator, String raw) @private => @pool() {
+    sz rp = raw.rindex_of(")")!;
 
-        String after = raw[(rp + 2)..];
+    String after = raw[(rp + 2)..];
 
-        String[] raw_fields = linsys::split_whitespace(tmem, after);
+    String[] raw_fields = linsys::split_whitespace(tmem, after);
 
-        List{String} fields;
-        fields.init(allocator);
-        defer fields.free();
+    List{String} fields;
+    fields.init(allocator);
+    defer fields.free();
 
-        foreach (f : raw_fields) {
-            if (f.len > 0) {
-                fields.push(f);
-            }
+    foreach (f : raw_fields) {
+        if (f.len > 0) {
+            fields.push(f);
         }
+    }
 
-        return fields.to_array(allocator);
-    };
+    return fields.to_array(allocator);
 }
 
-fn CpuTimes? cpu_times_parse(String path) @private {
-    @pool() {
-        CpuTimes cpu = { };
-        File file    = file::open(path, "r")!;
-        defer (void)file.close();
-        String raw      = linsys::read_file(tmem, file)!;
-        String[] fields = parse_proc_stat_fields(tmem, raw)!;
+fn CpuTimes? cpu_times_parse(String path) @private => @pool() {
+    CpuTimes cpu = { };
+    File file    = file::open(path, "r")!;
+    defer (void)file.close();
+    String raw      = linsys::read_file(tmem, file)!;
+    String[] fields = parse_proc_stat_fields(tmem, raw)!;
 
-        if (fields.len > 14) {
-            double clk = system::clktck();
+    if (fields.len > 14) {
+        double clk = system::clktck();
 
-            if (try double utime = fields[11].to_double()) {
-                cpu.user = utime / clk;
-            } else {
-                linsys::push_error("cputimes::user", linsys::PARSE_ERROR);
-            }
-            if (try double stime = fields[12].to_double()) {
-                cpu.system = stime / clk;
-            } else {
-                linsys::push_error("cputimes::system", linsys::PARSE_ERROR);
-            }
-
-            if (try double cutime = fields[13].to_double()) {
-                cpu.children_user = cutime / clk;
-            } else {
-                linsys::push_error("cputimes::childre_user", linsys::PARSE_ERROR);
-            }
-
-            if (try double cstime = fields[14].to_double()) {
-                cpu.children_system = cstime / clk;
-            } else {
-                linsys::push_error("cputimes::children_system", linsys::PARSE_ERROR);
-            }
+        if (try double utime = fields[11].to_double()) {
+            cpu.user = utime / clk;
+        } else {
+            linsys::push_error("cputimes::user", linsys::PARSE_ERROR);
         }
-        return cpu;
-    };
+        if (try double stime = fields[12].to_double()) {
+            cpu.system = stime / clk;
+        } else {
+            linsys::push_error("cputimes::system", linsys::PARSE_ERROR);
+        }
+
+        if (try double cutime = fields[13].to_double()) {
+            cpu.children_user = cutime / clk;
+        } else {
+            linsys::push_error("cputimes::childre_user", linsys::PARSE_ERROR);
+        }
+
+        if (try double cstime = fields[14].to_double()) {
+            cpu.children_system = cstime / clk;
+        } else {
+            linsys::push_error("cputimes::children_system", linsys::PARSE_ERROR);
+        }
+    }
+    return cpu;
 }
 
 <*
  @require pid > 0 : "pid must be positive"
 *>
-fn CpuTimes? cpu_times(int pid) {
-    @pool() {
-        String p = string::tformat("/proc/%d/stat", pid);
-        return cpu_times_parse(p)!;
-    };
+fn CpuTimes? cpu_times(int pid) => @pool() {
+    String p = string::tformat("/proc/%d/stat", pid);
+    return cpu_times_parse(p)!;
 }
 
 <*
  @require pid > 0 : "pid must be positive"
  @require tid > 0 : "tid must be positive"
 *>
-fn CpuTimes? cpu_times_threads(int pid, int tid) {
-    @pool() {
-        String p = string::tformat("/proc/%d/task/%d/stat", pid, tid);
-        return cpu_times_parse(p)!;
-    };
+fn CpuTimes? cpu_times_threads(int pid, int tid) => @pool() {
+    String p = string::tformat("/proc/%d/task/%d/stat", pid, tid);
+    return cpu_times_parse(p)!;
 }
 
 // Should I even keep this?
@@ -877,65 +839,59 @@ fn double? cpu_percent(int pid, double interval) {
     return cpu_percent_from(snap, pid);
 }
 
-fn ulong? parse_proc_ulong(String path, String key) @private {
+fn ulong? parse_proc_ulong(String path, String key) @private => @pool() {
     ulong result = 0;
-    @pool() {
-        File file = file::open(path, "r")!;
-        defer (void)file.close();
+    File file    = file::open(path, "r")!;
+    defer (void)file.close();
 
-        while (try line = io::treadline(&file)) {
-            if (!line.starts_with(key)) continue;
-            String[] s = line.trim().split(tmem, ":");
-            if (s.len < 2) continue;
-            if (try ulong v = s[1].trim().strip_suffix(" kB").to_ulong()) result = v;
-            break;
-        }
-    };
+    while (try line = io::treadline(&file)) {
+        if (!line.starts_with(key)) continue;
+        String[] s = line.trim().split(tmem, ":");
+        if (s.len < 2) continue;
+        if (try ulong v = s[1].trim().strip_suffix(" kB").to_ulong()) result = v;
+        break;
+    }
     return result;
 }
 
 <*
  @require pid > 0 : "pid must be positive"
 *>
-fn double? memory_percent(int pid) {
-    @pool() {
-        String p        = string::tformat("/proc/%d/status", pid);
-        ulong vmrs      = parse_proc_ulong(p, "VmRSS")!;
-        ulong total_mem = parse_proc_ulong("/proc/meminfo", "MemTotal")!;
-        if (total_mem == 0) return 0.0;
-        return ((double)vmrs / (double)total_mem) * 100.0;
-    };
+fn double? memory_percent(int pid) => @pool() {
+    String p        = string::tformat("/proc/%d/status", pid);
+    ulong vmrs      = parse_proc_ulong(p, "VmRSS")!;
+    ulong total_mem = parse_proc_ulong("/proc/meminfo", "MemTotal")!;
+    if (total_mem == 0) return 0.0;
+    return ((double)vmrs / (double)total_mem) * 100.0;
 }
 
 <*
  @require pid > 0 : "pid must be positive"
 *>
-fn IoCounters? io_counters(int pid) {
+fn IoCounters? io_counters(int pid) => @pool() {
     IoCounters ioc = { };
-    @pool() {
-        String path = string::tformat("/proc/%d/io", pid);
-        File file   = file::open(path, "r")!;
-        defer (void)file.close();
+    String path    = string::tformat("/proc/%d/io", pid);
+    File file      = file::open(path, "r")!;
+    defer (void)file.close();
 
-        while (try line = io::treadline(&file)) {
-            String[] split = line.split(tmem, ":");
-            if (split.len < 2) {
-                linsys::push_error("iocounters::line", linsys::PARSE_ERROR);
-                continue;
-            }
-
-            String key = split[0].trim();
-            ulong v    = 0;
-            linsys::@try_field(v, split[1].trim().to_ulong(), "iocounters::value", 0);
-
-            switch (key) {
-                case "rchar": ioc.read_count = v;
-                case "wchar": ioc.write_count = v;
-                case "read_bytes": ioc.read_bytes = v;
-                case "write_bytes": ioc.write_bytes = v;
-            }
+    while (try line = io::treadline(&file)) {
+        String[] split = line.split(tmem, ":");
+        if (split.len < 2) {
+            linsys::push_error("iocounters::line", linsys::PARSE_ERROR);
+            continue;
         }
-    };
+
+        String key = split[0].trim();
+        ulong v    = 0;
+        linsys::@try_field(v, split[1].trim().to_ulong(), "iocounters::value", 0);
+
+        switch (key) {
+            case "rchar": ioc.read_count = v;
+            case "wchar": ioc.write_count = v;
+            case "read_bytes": ioc.read_bytes = v;
+            case "write_bytes": ioc.write_bytes = v;
+        }
+    }
     return ioc;
 }
 
@@ -974,74 +930,70 @@ struct PidEntry {
 <*
  @require pid > 0 : "pid must be positive"
 *>
-fn int[]? children(Allocator allocator, int pid, bool recursive = false) {
-    @pool() {
-        if (!exists(pid)) return linsys::NO_SUCH_PROCESS~;
-        int[] pid_list = list_pids(tmem)!;
+fn int[]? children(Allocator allocator, int pid, bool recursive = false) => @pool() {
+    if (!exists(pid)) return linsys::NO_SUCH_PROCESS~;
+    int[] pid_list = list_pids(tmem)!;
 
-        List{PidEntry} entries;
-        entries.init(tmem);
+    List{PidEntry} entries;
+    entries.init(tmem);
 
-        char[4096] buf;
-        foreach (p : pid_list) {
-            String path = string::tformat("/proc/%d/stat", p);
-            File? file  = file::open(path, "r");
+    char[4096] buf;
+    foreach (p : pid_list) {
+        String path = string::tformat("/proc/%d/stat", p);
+        File? file  = file::open(path, "r");
 
-            if (catch file) continue;
-            defer (void)file.close();
-            sz? n = file.read(&buf);
+        if (catch file) continue;
+        defer (void)file.close();
+        sz? n = file.read(&buf);
 
-            if (catch n) continue;
-            String stat     = (String)buf[:n];
-            sz end_comm     = stat.rindex_of(")")!;
-            String after    = stat[end_comm + 2..];
-            String[] fields = linsys::split_whitespace(tmem, after);
+        if (catch n) continue;
+        String stat     = (String)buf[:n];
+        sz end_comm     = stat.rindex_of(")")!;
+        String after    = stat[end_comm + 2..];
+        String[] fields = linsys::split_whitespace(tmem, after);
 
-            if (fields.len < 2) {
-                linsys::push_error("children::fields", linsys::PARSE_ERROR);
-                continue;
-            }
-            int ppid = fields[1].to_int()!;
-
-            entries.push({ p, ppid });
+        if (fields.len < 2) {
+            linsys::push_error("children::fields", linsys::PARSE_ERROR);
+            continue;
         }
+        int ppid = fields[1].to_int()!;
 
-        List{int} result;
-        result.init(allocator);
-        defer result.free();
+        entries.push({ p, ppid });
+    }
 
-        List{int} queue;
-        queue.init(tmem);
-        queue.push(pid);
+    List{int} result;
+    result.init(allocator);
+    defer result.free();
 
-        while (queue.len() > 0) {
-            int current = queue.pop()!;
-            foreach (e : entries) {
-                if (e.ppid != current) continue;
-                result.push(e.pid);
-                if (recursive) queue.push(e.pid);
-            }
+    List{int} queue;
+    queue.init(tmem);
+    queue.push(pid);
+
+    while (queue.len() > 0) {
+        int current = queue.pop()!;
+        foreach (e : entries) {
+            if (e.ppid != current) continue;
+            result.push(e.pid);
+            if (recursive) queue.push(e.pid);
         }
+    }
 
-        return result.to_array(allocator);
-    };
+    return result.to_array(allocator);
 }
 
 <*
  @require pid > 0 : "pid must be positive"
 *>
-fn int? parent(int pid) {
-    @pool() {
-        String path = string::tformat("/proc/%d/stat", pid);
-        File file   = file::open(path, "r")!;
-        defer (void)file.close();
-        char[4096] buf;
-        sz n            = file.read(&buf)!;
-        String stat     = (String)buf[:n];
-        String[] fields = parse_proc_stat_fields(tmem, stat)!;
-        if (fields.len < 2) return linsys::PARSE_ERROR~;
-        return fields[1].to_int()!;
-    };
+fn int? parent(int pid) => @pool() {
+    String path = string::tformat("/proc/%d/stat", pid);
+    File file   = file::open(path, "r")!;
+    defer (void)file.close();
+    char[4096] buf;
+    sz n            = file.read(&buf)!;
+    String stat     = (String)buf[:n];
+    String[] fields = parse_proc_stat_fields(tmem, stat)!;
+    if (fields.len < 2) return linsys::PARSE_ERROR~;
+    return fields[1].to_int()!;
 }
 
 <*
@@ -1129,54 +1081,52 @@ fn void? cpu_affinity_set(int pid, int[] cpus) {
 <*
  @require pid > 0 : "pid must be positive"
 *>
-fn RLimitEntry[]? rlimits_get(Allocator allocator, int pid) {
-    @pool() {
-        String path = string::tformat("/proc/%d/limits", pid);
-        File file   = file::open(path, "r")!;
-        defer (void)file.close();
-        List{RLimitEntry} entries;
-        entries.init(allocator);
-        defer entries.free();
+fn RLimitEntry[]? rlimits_get(Allocator allocator, int pid) => @pool() {
+    String path = string::tformat("/proc/%d/limits", pid);
+    File file   = file::open(path, "r")!;
+    defer (void)file.close();
+    List{RLimitEntry} entries;
+    entries.init(allocator);
+    defer entries.free();
 
-        int i = 0;
-        while (try line = io::treadline(&file)) {
-            if (i++ == 0 || line.len == 0) continue;
-            String[] parts = linsys::split_whitespace(tmem, line.trim());
-            int pc         = 0;
-            String[4] filtered;
+    int i = 0;
+    while (try line = io::treadline(&file)) {
+        if (i++ == 0 || line.len == 0) continue;
+        String[] parts = linsys::split_whitespace(tmem, line.trim());
+        int pc         = 0;
+        String[4] filtered;
 
-            foreach (p : parts) {
-                String t = p.trim();
-                if (t.len > 0) filtered[pc++] = t;
-                if (pc == 4) break;
-            }
-
-            if (pc < 3) {
-                linsys::push_error("rlimitentry::line", linsys::PARSE_ERROR);
-                continue;
-            }
-
-            ulong soft;
-            ulong hard;
-
-            if (filtered[1] == "unlimited") {
-                soft = ulong::max;
-            } else {
-                linsys::@try_field(soft, filtered[1].to_ulong(), "limit::soft", 0);
-            }
-            if (filtered[2] == "unlimited") {
-                hard = ulong::max;
-            } else {
-                linsys::@try_field(hard, filtered[2].to_ulong(), "limit::hard", 0);
-            }
-
-            entries.push(
-                { .name = filtered[0].copy(allocator), .limit = { .soft = soft, .hard = hard } }
-            );
+        foreach (p : parts) {
+            String t = p.trim();
+            if (t.len > 0) filtered[pc++] = t;
+            if (pc == 4) break;
         }
 
-        return entries.to_array(allocator);
-    };
+        if (pc < 3) {
+            linsys::push_error("rlimitentry::line", linsys::PARSE_ERROR);
+            continue;
+        }
+
+        ulong soft;
+        ulong hard;
+
+        if (filtered[1] == "unlimited") {
+            soft = ulong::max;
+        } else {
+            linsys::@try_field(soft, filtered[1].to_ulong(), "limit::soft", 0);
+        }
+        if (filtered[2] == "unlimited") {
+            hard = ulong::max;
+        } else {
+            linsys::@try_field(hard, filtered[2].to_ulong(), "limit::hard", 0);
+        }
+
+        entries.push(
+            { .name = filtered[0].copy(allocator), .limit = { .soft = soft, .hard = hard } }
+        );
+    }
+
+    return entries.to_array(allocator);
 }
 
 fn void RLimitEntry[].free(self, Allocator allocator) => linsys::free_slice(self, allocator);
@@ -1185,76 +1135,70 @@ fn void RLimitEntry.free(self, Allocator allocator) => linsys::free_fields(self,
 <*
  @require pid > 0 : "pid must be positive"
 *>
-fn ThreadInfo[]? threads(Allocator allocator, int pid) {
-    @pool() {
-        Path path     = string::tformat("/proc/%d/task", pid).to_path(tmem)!;
-        PathList list = io::path::ls(tmem, path)!;
+fn ThreadInfo[]? threads(Allocator allocator, int pid) => @pool() {
+    Path path     = string::tformat("/proc/%d/task", pid).to_path(tmem)!;
+    PathList list = io::path::ls(tmem, path)!;
 
-        List{ThreadInfo} ti;
-        ti.init(allocator);
-        defer ti.free();
+    List{ThreadInfo} ti;
+    ti.init(allocator);
+    defer ti.free();
 
-        foreach (l : list) {
-            if (try int tid = l.basename().to_int()) {
-                CpuTimes? ct = cpu_times_threads(pid, tid);
-                if (catch ct) continue;
-                ti.push(
-                    {
-                        .tid = tid,
-                        .cpu_times = {
-                            .user = ct.user,
-                            .system = ct.system,
-                            .children_user = ct.children_user,
-                            .children_system = ct.children_system,
-                        }
+    foreach (l : list) {
+        if (try int tid = l.basename().to_int()) {
+            CpuTimes? ct = cpu_times_threads(pid, tid);
+            if (catch ct) continue;
+            ti.push(
+                {
+                    .tid = tid,
+                    .cpu_times = {
+                        .user = ct.user,
+                        .system = ct.system,
+                        .children_user = ct.children_user,
+                        .children_system = ct.children_system,
                     }
-                );
-            } else {
-                linsys::push_error("threadinfo::line", linsys::PARSE_ERROR);
-            }
+                }
+            );
+        } else {
+            linsys::push_error("threadinfo::line", linsys::PARSE_ERROR);
         }
-        return ti.to_array(allocator);
-    };
+    }
+    return ti.to_array(allocator);
 }
 
 fn void ThreadInfo[].free(self, Allocator allocator) => linsys::free_slice(self, allocator);
 fn void ThreadInfo.free(self, Allocator allocator) => linsys::free_fields(self, allocator);
 
-fn Process[]? all_processes(Allocator allocator) {
-    @pool() {
-        int[] pids = list_pids(tmem)!;
-        List{Process} result;
-        result.init(allocator);
-        defer result.free();
+fn Process[]? all_processes(Allocator allocator) => @pool() {
+    int[] pids = list_pids(tmem)!;
+    List{Process} result;
+    result.init(allocator);
+    defer result.free();
 
-        foreach (pid : pids) {
-            if (try Process p = proc(allocator, pid)) {
-                result.push(p);
-            }
+    foreach (pid : pids) {
+        if (try Process p = proc(allocator, pid)) {
+            result.push(p);
         }
-        return result.to_array(allocator);
-    };
+    }
+    return result.to_array(allocator);
 }
 
 <*
  @require name.len > 0 : "name must not be empty"
 *>
-fn Process[]? find_by_name(Allocator allocator, String name) {
-    @pool() {
-        int[] pids = list_pids(tmem)!;
-        List{Process} result;
-        result.init(allocator);
-        defer result.free();
+fn Process[]? find_by_name(Allocator allocator, String name) => @pool() {
+    int[] pids = list_pids(tmem)!;
+    List{Process} result;
+    result.init(allocator);
+    defer result.free();
 
-        foreach (pid : pids) {
-            if (try Process p = proc(allocator, pid)) {
-                if (p.name == name) {
-                    result.push(p);
-                } else {
-                    p.free(allocator);
-                }
+    foreach (pid : pids) {
+        if (try Process p = proc(allocator, pid)) {
+            if (p.name == name) {
+                result.push(p);
+            } else {
+                p.free(allocator);
             }
         }
-        return result.to_array(allocator);
-    };
+    }
+    return result.to_array(allocator);
 }

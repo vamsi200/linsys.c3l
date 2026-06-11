@@ -80,68 +80,56 @@ struct NetConnPoller {
     Allocator allocator;
 }
 
-fn NetIoCounters? parse_net_io_line(Allocator allocator, String line) @private {
-    @pool() {
-        sz? idx = line.index_of_char(':');
-        if (catch idx) return linsys::PARSE_ERROR~;
+fn NetIoCounters? parse_net_io_line(Allocator allocator, String line) @private => @pool() {
+    sz? idx = line.index_of_char(':');
+    if (catch idx) return linsys::PARSE_ERROR~;
 
-        String iface = line[:idx].trim();
+    String iface = line[:idx].trim();
 
-        String[] fields = linsys::split_whitespace(tmem, line[idx + 1..].trim());
+    String[] fields = linsys::split_whitespace(tmem, line[idx + 1..].trim());
 
-        ulong bytes_recv, packets_recv, errin, dropin;
-        ulong bytes_sent, packets_sent, errout, dropout;
+    ulong bytes_recv, packets_recv, errin, dropin;
+    ulong bytes_sent, packets_sent, errout, dropout;
 
-        if (fields.len > 0) linsys::@try_field(
-            bytes_recv,
-            fields[0].to_ulong(),
-            "netiface::bytes_recv",
-            0
-        );
-        if (fields.len > 1) linsys::@try_field(
-            packets_recv,
-            fields[1].to_ulong(),
-            "netiface::packets_recv",
-            0
-        );
-        if (fields.len > 2) linsys::@try_field(errin, fields[2].to_ulong(), "netiface::errin", 0);
-        if (fields.len > 3) linsys::@try_field(dropin, fields[3].to_ulong(), "netiface::dropin", 0);
-        if (fields.len > 8) linsys::@try_field(
-            bytes_sent,
-            fields[8].to_ulong(),
-            "netiface::bytes_sent",
-            0
-        );
-        if (fields.len > 9) linsys::@try_field(
-            packets_sent,
-            fields[9].to_ulong(),
-            "netiface::packets_sent",
-            0
-        );
-        if (fields.len > 10) linsys::@try_field(
-            errout,
-            fields[10].to_ulong(),
-            "netiface::errout",
-            0
-        );
-        if (fields.len > 11) linsys::@try_field(
-            dropout,
-            fields[11].to_ulong(),
-            "netiface::dropout",
-            0
-        );
+    if (fields.len > 0) linsys::@try_field(
+        bytes_recv,
+        fields[0].to_ulong(),
+        "netiface::bytes_recv",
+        0
+    );
+    if (fields.len > 1) linsys::@try_field(
+        packets_recv,
+        fields[1].to_ulong(),
+        "netiface::packets_recv",
+        0
+    );
+    if (fields.len > 2) linsys::@try_field(errin, fields[2].to_ulong(), "netiface::errin", 0);
+    if (fields.len > 3) linsys::@try_field(dropin, fields[3].to_ulong(), "netiface::dropin", 0);
+    if (fields.len > 8) linsys::@try_field(
+        bytes_sent,
+        fields[8].to_ulong(),
+        "netiface::bytes_sent",
+        0
+    );
+    if (fields.len > 9) linsys::@try_field(
+        packets_sent,
+        fields[9].to_ulong(),
+        "netiface::packets_sent",
+        0
+    );
+    if (fields.len > 10) linsys::@try_field(errout, fields[10].to_ulong(), "netiface::errout", 0);
+    if (fields.len > 11) linsys::@try_field(dropout, fields[11].to_ulong(), "netiface::dropout", 0);
 
-        return {
-            .name = iface.copy(allocator),
-            .bytes_recv = bytes_recv,
-            .packets_recv = packets_recv,
-            .errin = errin,
-            .dropin = dropin,
-            .bytes_sent = bytes_sent,
-            .packets_sent = packets_sent,
-            .errout = errout,
-            .dropout = dropout,
-        };
+    return {
+        .name = iface.copy(allocator),
+        .bytes_recv = bytes_recv,
+        .packets_recv = packets_recv,
+        .errin = errin,
+        .dropin = dropin,
+        .bytes_sent = bytes_sent,
+        .packets_sent = packets_sent,
+        .errout = errout,
+        .dropout = dropout,
     };
 }
 
@@ -185,15 +173,13 @@ fn Connection[]? connections(Allocator allocator, Protocol[] protos = ALL_PROTOC
     return out.to_array(allocator);
 }
 
-macro void? NetConnPoller.@poll(&self; @body(conns)) {
-    @pool() {
-        self.list.clear();
-        for (usz i = 0; i < self.count; i++) {
-            self.files[i].seek(0, FROM_START)!;
-            read_system_connections(tmem, self.protos[i], &self.files[i], &self.list)!;
-        }
-        @body(self.list.array_view());
-    };
+macro void? NetConnPoller.@poll(&self; @body(conns)) => @pool() {
+    self.list.clear();
+    for (usz i = 0; i < self.count; i++) {
+        self.files[i].seek(0, FROM_START)!;
+        read_system_connections(tmem, self.protos[i], &self.files[i], &self.list)!;
+    }
+    @body(self.list.array_view());
 }
 
 fn NetConnPoller? poller(Allocator allocator, Protocol[] protos = ALL_PROTOCOLS) {
@@ -218,15 +204,13 @@ fn void NetConnPoller.close(&self) {
 }
 
 
-fn NetIoCounters[]? io_counters(Allocator allocator) {
+fn NetIoCounters[]? io_counters(Allocator allocator) => @pool() {
     List{NetIoCounters} list;
     defer list.free();
 
-    @pool() {
-        File file = file::open("/proc/net/dev", "r")!;
-        defer (void)file.close();
-        return parse_net_io(allocator, &file, list);
-    };
+    File file = file::open("/proc/net/dev", "r")!;
+    defer (void)file.close();
+    return parse_net_io(allocator, &file, list);
 }
 
 fn void NetIoCounters[].free(self, Allocator allocator) => linsys::free_slice(self, allocator);
@@ -237,61 +221,54 @@ fn void? read_system_connections(
     Protocol proto,
     File* file,
     List{Connection}* out
-) @private {
-    @pool() {
-        bool is_v6 = proto == Protocol.TCP6 || proto == Protocol.UDP6;
-        int i      = 0;
+) @private => @pool() {
+    bool is_v6 = proto == Protocol.TCP6 || proto == Protocol.UDP6;
+    int i      = 0;
 
-        while (try line = io::treadline(file)) {
-            if (i++ == 0 || line.len == 0) continue;
-            String[] fields = linsys::split_whitespace(tmem, line.trim());
-            if (fields.len < 4) continue;
+    while (try line = io::treadline(file)) {
+        if (i++ == 0 || line.len == 0) continue;
+        String[] fields = linsys::split_whitespace(tmem, line.trim());
+        if (fields.len < 4) continue;
 
-            sz? colon_l = fields[1].index_of_char(':');
-            sz? colon_r = fields[2].index_of_char(':');
+        sz? colon_l = fields[1].index_of_char(':');
+        sz? colon_r = fields[2].index_of_char(':');
 
-            if (catch colon_l) {
-                linsys::push_error("connection::local_addr", linsys::PARSE_ERROR);
-                continue;
-            }
-            if (catch colon_r) {
-                linsys::push_error("connection::remote_addr", linsys::PARSE_ERROR);
-                continue;
-            }
-
-            String local_addr  = fields[1][:colon_l];
-            String local_port  = fields[1][colon_l + 1..];
-            String remote_addr = fields[2][:colon_r];
-            String remote_port = fields[2][colon_r + 1..];
-
-            ushort lport;
-            ushort rport;
-            linsys::@try_field(lport, (ushort)local_port.to_long(16), "connection::local_port", 0);
-            linsys::@try_field(
-                rport,
-                (ushort)remote_port.to_long(16),
-                "connection::remote_port",
-                0
-            );
-
-            out.push(
-                {
-                    .local_addr = is_v6 ? linsys::ip_to_string_v6(
-                        allocator,
-                        linsys::parse_addr6(local_addr)
-                    ) : linsys::ip_to_string(allocator, linsys::parse_addr(local_addr)),
-                    .remote_addr = is_v6 ? linsys::ip_to_string_v6(
-                        allocator,
-                        linsys::parse_addr6(remote_addr)
-                    ) : linsys::ip_to_string(allocator, linsys::parse_addr(remote_addr)),
-                    .local_port = lport,
-                    .remote_port = rport,
-                    .state = linsys::tcp_state(fields[3]),
-                    .protocol = proto,
-                }
-            );
+        if (catch colon_l) {
+            linsys::push_error("connection::local_addr", linsys::PARSE_ERROR);
+            continue;
         }
-    };
+        if (catch colon_r) {
+            linsys::push_error("connection::remote_addr", linsys::PARSE_ERROR);
+            continue;
+        }
+
+        String local_addr  = fields[1][:colon_l];
+        String local_port  = fields[1][colon_l + 1..];
+        String remote_addr = fields[2][:colon_r];
+        String remote_port = fields[2][colon_r + 1..];
+
+        ushort lport;
+        ushort rport;
+        linsys::@try_field(lport, (ushort)local_port.to_long(16), "connection::local_port", 0);
+        linsys::@try_field(rport, (ushort)remote_port.to_long(16), "connection::remote_port", 0);
+
+        out.push(
+            {
+                .local_addr = is_v6 ? linsys::ip_to_string_v6(
+                    allocator,
+                    linsys::parse_addr6(local_addr)
+                ) : linsys::ip_to_string(allocator, linsys::parse_addr(local_addr)),
+                .remote_addr = is_v6 ? linsys::ip_to_string_v6(
+                    allocator,
+                    linsys::parse_addr6(remote_addr)
+                ) : linsys::ip_to_string(allocator, linsys::parse_addr(remote_addr)),
+                .local_port = lport,
+                .remote_port = rport,
+                .state = linsys::tcp_state(fields[3]),
+                .protocol = proto,
+            }
+        );
+    }
 }
 
 fn String sockaddr_to_string(Allocator allocator, void* sa) @private {
@@ -370,58 +347,56 @@ fn NetIfAddr[]? interface_addrs(Allocator allocator) {
 fn void NetIfAddr[].free(self, Allocator allocator) => linsys::free_slice(self, allocator);
 fn void NetIfAddr.free(self, Allocator allocator) => linsys::free_fields(self, allocator);
 
-fn NetIfStats[]? interface_stats(Allocator allocator) {
-    @pool() {
-        Path path = path::new(tmem, "/sys/class/net")!;
+fn NetIfStats[]? interface_stats(Allocator allocator) => @pool() {
+    Path path = path::new(tmem, "/sys/class/net")!;
 
-        PathList list = io::path::ls(tmem, path)!;
+    PathList list = io::path::ls(tmem, path)!;
 
-        List{NetIfStats} stats;
-        stats.init(allocator);
-        defer stats.free();
+    List{NetIfStats} stats;
+    stats.init(allocator);
+    defer stats.free();
 
-        foreach (entry : list) {
-            String? iface = entry.file_tbasename();
-            if (catch iface) continue;
+    foreach (entry : list) {
+        String? iface = entry.file_tbasename();
+        if (catch iface) continue;
 
-            NetIfStats st = { .name = iface.copy(allocator), };
+        NetIfStats st = { .name = iface.copy(allocator), };
 
-            String base = string::tformat("/sys/class/net/%s", iface);
+        String base = string::tformat("/sys/class/net/%s", iface);
 
-            String oper = string::tformat("%s/operstate", base);
+        String oper = string::tformat("%s/operstate", base);
 
-            if (try File f = file::open(oper, "r")) {
-                defer (void)f.close();
-                String state = linsys::read_file(tmem, f)!.trim();
-                st.is_up = state == "up";
-            }
-
-            String mtu = string::tformat("%s/mtu", base);
-
-            if (try File f = file::open(mtu, "r")) {
-                defer (void)f.close();
-                st.mtu = linsys::read_file(tmem, f)!.trim().to_int() ?? 0;
-            }
-
-            String speed = string::tformat("%s/speed", base);
-
-            if (try File f = file::open(speed, "r")) {
-                defer (void)f.close();
-                st.speed = linsys::read_file(tmem, f)!.trim().to_int() ?? 0;
-            }
-
-            String flags = string::tformat("%s/flags", base);
-
-            if (try File f = file::open(flags, "r")) {
-                defer (void)f.close();
-                st.flags = linsys::read_file(tmem, f)!.trim().to_ulong(16) ?? 0;
-            }
-
-            stats.push(st);
+        if (try File f = file::open(oper, "r")) {
+            defer (void)f.close();
+            String state = linsys::read_file(tmem, f)!.trim();
+            st.is_up = state == "up";
         }
 
-        return stats.to_array(allocator);
-    };
+        String mtu = string::tformat("%s/mtu", base);
+
+        if (try File f = file::open(mtu, "r")) {
+            defer (void)f.close();
+            st.mtu = linsys::read_file(tmem, f)!.trim().to_int() ?? 0;
+        }
+
+        String speed = string::tformat("%s/speed", base);
+
+        if (try File f = file::open(speed, "r")) {
+            defer (void)f.close();
+            st.speed = linsys::read_file(tmem, f)!.trim().to_int() ?? 0;
+        }
+
+        String flags = string::tformat("%s/flags", base);
+
+        if (try File f = file::open(flags, "r")) {
+            defer (void)f.close();
+            st.flags = linsys::read_file(tmem, f)!.trim().to_ulong(16) ?? 0;
+        }
+
+        stats.push(st);
+    }
+
+    return stats.to_array(allocator);
 }
 
 fn void NetIfStats[].free(self, Allocator allocator) => linsys::free_slice(self, allocator);

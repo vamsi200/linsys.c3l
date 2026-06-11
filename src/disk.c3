@@ -57,38 +57,36 @@ struct DiskContext {
     Allocator allocator;
 }
 
-fn DiskPartition[]? partitions(Allocator allocator) {
-    @pool() {
-        File file = file::open("/proc/mounts", "r")!;
-        defer (void)file.close();
+fn DiskPartition[]? partitions(Allocator allocator) => @pool() {
+    File file = file::open("/proc/mounts", "r")!;
+    defer (void)file.close();
 
-        List{DiskPartition} parts;
-        parts.init(allocator);
-        defer parts.free();
+    List{DiskPartition} parts;
+    parts.init(allocator);
+    defer parts.free();
 
-        while (try line = io::treadline(&file)) {
-            if (line.len == 0) {
-                continue;
-            }
-
-            String[] fields = linsys::split_whitespace(tmem, line);
-            if (fields.len < 4) {
-                linsys::push_error("diskpartition::line", linsys::PARSE_ERROR);
-                continue;
-            }
-
-            parts.push(
-                {
-                    .device = fields[0].copy(allocator),
-                    .mountpoint = fields[1].copy(allocator),
-                    .filesystem = fields[2].copy(allocator),
-                    .options = fields[3].copy(allocator),
-                }
-            );
+    while (try line = io::treadline(&file)) {
+        if (line.len == 0) {
+            continue;
         }
 
-        return parts.to_array(allocator);
-    };
+        String[] fields = linsys::split_whitespace(tmem, line);
+        if (fields.len < 4) {
+            linsys::push_error("diskpartition::line", linsys::PARSE_ERROR);
+            continue;
+        }
+
+        parts.push(
+            {
+                .device = fields[0].copy(allocator),
+                .mountpoint = fields[1].copy(allocator),
+                .filesystem = fields[2].copy(allocator),
+                .options = fields[3].copy(allocator),
+            }
+        );
+    }
+
+    return parts.to_array(allocator);
 }
 
 fn void DiskPartition[].free(self, Allocator allocator) => linsys::free_slice(self, allocator);
@@ -135,7 +133,7 @@ fn void DiskContext.free(&self) {
     self.cache_mutex.destroy();
 }
 
-fn ulong DiskContext.sector_size(&self, String device) {
+fn ulong DiskContext.sector_size(&self, String device) => @pool() {
     self.cache_mutex.lock();
 
     if (try ulong size = self.sector_size_cache.get(device)) {
@@ -144,16 +142,14 @@ fn ulong DiskContext.sector_size(&self, String device) {
     }
     self.cache_mutex.unlock();
 
-    @pool() {
-        String sector_path = string::tformat("/sys/block/%s/queue/physical_block_size", device);
-        ulong size         = linsys::read_ulong_file(sector_path) ?? 512;
-        self.cache_mutex.lock();
-        defer self.cache_mutex.unlock();
+    String sector_path = string::tformat("/sys/block/%s/queue/physical_block_size", device);
+    ulong size         = linsys::read_ulong_file(sector_path) ?? 512;
+    self.cache_mutex.lock();
+    defer self.cache_mutex.unlock();
 
-        if (try ulong existing = self.sector_size_cache.get(device)) return existing;
-        self.sector_size_cache.set(device, size);
-        return size;
-    };
+    if (try ulong existing = self.sector_size_cache.get(device)) return existing;
+    self.sector_size_cache.set(device, size);
+    return size;
 }
 
 const int DISKSTATS_MIN_FIELDS = 14; // kernel 2.6+
@@ -196,25 +192,23 @@ fn DiskIoCounters? parse_line(Allocator allocator, String[] fields, DiskContext*
     };
 }
 
-fn DiskIoCounters[]? io_counters(Allocator allocator, DiskContext* ctx) {
-    @pool() {
-        File file = file::open("/proc/diskstats", "r")!;
-        defer (void)file.close();
-        List{DiskIoCounters} disks;
-        disks.init(allocator);
-        defer disks.free();
+fn DiskIoCounters[]? io_counters(Allocator allocator, DiskContext* ctx) => @pool() {
+    File file = file::open("/proc/diskstats", "r")!;
+    defer (void)file.close();
+    List{DiskIoCounters} disks;
+    disks.init(allocator);
+    defer disks.free();
 
-        while (try line = io::treadline(&file)) {
-            if (line.len == 0) continue;
-            String[] fields = linsys::split_whitespace(tmem, line.trim());
-            if (try disk = parse_line(allocator, fields, ctx)) {
-                disks.push(disk);
-            } else {
-                linsys::push_error("diskiocounters::line", linsys::PARSE_ERROR);
-            }
+    while (try line = io::treadline(&file)) {
+        if (line.len == 0) continue;
+        String[] fields = linsys::split_whitespace(tmem, line.trim());
+        if (try disk = parse_line(allocator, fields, ctx)) {
+            disks.push(disk);
+        } else {
+            linsys::push_error("diskiocounters::line", linsys::PARSE_ERROR);
         }
-        return disks.to_array(allocator);
-    };
+    }
+    return disks.to_array(allocator);
 }
 
 fn void DiskIoCounters[].free(self, Allocator allocator) => linsys::free_slice(self, allocator);
@@ -223,24 +217,25 @@ fn void DiskIoCounters.free(self, Allocator allocator) => linsys::free_fields(se
 <*
  @require device.len > 0 : "device name must not be empty"
 *>
-fn DiskIoCounters? io_counters_perdisk(Allocator allocator, String device, DiskContext* ctx) {
-    @pool() {
-        File file = file::open("/proc/diskstats", "r")!;
-        defer (void)file.close();
+fn DiskIoCounters? io_counters_perdisk(
+    Allocator allocator,
+    String device,
+    DiskContext* ctx
+) => @pool() {
+    File file = file::open("/proc/diskstats", "r")!;
+    defer (void)file.close();
 
-        while (try line = io::treadline(&file)) {
-            if (line.len == 0) continue;
-            String[] fields = linsys::split_whitespace(tmem, line.trim());
-            if (fields.len < DISKSTATS_MIN_FIELDS) {
-                linsys::push_error("diskiocounters::line", linsys::PARSE_ERROR);
-                continue;
-            }
-
-            if (fields[2] != device) continue;
-            return parse_line(allocator, fields, ctx);
+    while (try line = io::treadline(&file)) {
+        if (line.len == 0) continue;
+        String[] fields = linsys::split_whitespace(tmem, line.trim());
+        if (fields.len < DISKSTATS_MIN_FIELDS) {
+            linsys::push_error("diskiocounters::line", linsys::PARSE_ERROR);
+            continue;
         }
-    };
 
+        if (fields[2] != device) continue;
+        return parse_line(allocator, fields, ctx);
+    }
     return linsys::NOT_FOUND~;
 }
 
@@ -267,42 +262,38 @@ fn void DiskIoPoller.close(&self) {
     self.list.free();
 }
 
-macro void? DiskIoPoller.@poll(&self; @body(dio)) {
-    @pool() {
-        self.file.seek(0, FROM_START)!;
-        self.list.clear();
-        while (try line = io::treadline(&self.file)) {
-            if (line.len == 0) continue;
-            String[] fields = linsys::split_whitespace(tmem, line.trim());
-            if (try disk = parse_line(tmem, fields, self.ctx)) {
-                self.list.push(disk);
-            } else {
-                linsys::push_error("diskiopoller::line", linsys::PARSE_ERROR);
-            }
+macro void? DiskIoPoller.@poll(&self; @body(dio)) => @pool() {
+    self.file.seek(0, FROM_START)!;
+    self.list.clear();
+    while (try line = io::treadline(&self.file)) {
+        if (line.len == 0) continue;
+        String[] fields = linsys::split_whitespace(tmem, line.trim());
+        if (try disk = parse_line(tmem, fields, self.ctx)) {
+            self.list.push(disk);
+        } else {
+            linsys::push_error("diskiopoller::line", linsys::PARSE_ERROR);
         }
-        @body(self.list.array_view());
-    };
+    }
+    @body(self.list.array_view());
 }
 
 <*
  @require device.len > 0 : "device name must not be empty"
 *>
-macro void? DiskIoPoller.@poll_perdisk(&self, String device; @body(dio)) {
-    @pool() {
-        self.file.seek(0, FROM_START)!;
-        bool found = false;
-        while (try line = io::treadline(&self.file)) {
-            if (line.len == 0) continue;
-            String[] fields = linsys::split_whitespace(tmem, line.trim());
-            if (fields.len < DISKSTATS_MIN_FIELDS) continue;
-            if (fields[2] != device) continue;
-            found = true;
-            if (try dio = parse_line(tmem, fields, self.ctx)) {
-                @body(dio);
-            } else {
-                linsys::push_error("diskiopoller::line", linsys::PARSE_ERROR);
-            }
-            if (!found) return linsys::NOT_FOUND~;
+macro void? DiskIoPoller.@poll_perdisk(&self, String device; @body(dio)) => @pool() {
+    self.file.seek(0, FROM_START)!;
+    bool found = false;
+    while (try line = io::treadline(&self.file)) {
+        if (line.len == 0) continue;
+        String[] fields = linsys::split_whitespace(tmem, line.trim());
+        if (fields.len < DISKSTATS_MIN_FIELDS) continue;
+        if (fields[2] != device) continue;
+        found = true;
+        if (try dio = parse_line(tmem, fields, self.ctx)) {
+            @body(dio);
+        } else {
+            linsys::push_error("diskiopoller::line", linsys::PARSE_ERROR);
         }
-    };
+        if (!found) return linsys::NOT_FOUND~;
+    }
 }
