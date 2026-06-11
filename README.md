@@ -129,10 +129,8 @@ import linsys;
 import std::io;
 
 fn int main(String[] args) {
-    @pool() {
-        VirtualMemory mem = memory::virtual_memory() ?? {};
-        io::printn(mem);
-    };
+    VirtualMemory mem = memory::virtual_memory() ?? {};
+    io::printn(mem);
     return 0;
 }
 ```
@@ -150,10 +148,8 @@ import linsys;
 import std::io;
 
 fn int main(String[] args) {
-    @pool() {
-        DiskUsage usage = disk::usage("/") ?? {};
-        io::printn(usage);
-    };
+    DiskUsage usage = disk::usage("/") ?? {};
+    io::printn(usage);
     return 0;
 }
 ```
