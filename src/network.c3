@@ -376,21 +376,23 @@ fn NetIfStats[]? interface_stats(Allocator allocator) => @pool() {
 
         if (try File f = file::open(mtu, "r")) {
             defer (void)f.close();
-            st.mtu = linsys::read_file(tmem, f)!.trim().to_int() ?? 0;
+            st.mtu = (linsys::read_file(tmem, f) ?? "0").trim().to_int() ?? 0;
         }
 
         String speed = string::tformat("%s/speed", base);
 
         if (try File f = file::open(speed, "r")) {
             defer (void)f.close();
-            st.speed = linsys::read_file(tmem, f)!.trim().to_int() ?? 0;
+            st.speed = (linsys::read_file(tmem, f) ?? "0").trim().to_int() ?? 0;
         }
 
         String flags = string::tformat("%s/flags", base);
 
         if (try File f = file::open(flags, "r")) {
             defer (void)f.close();
-            st.flags = linsys::read_file(tmem, f)!.trim().to_ulong(16) ?? 0;
+            String raw = (linsys::read_file(tmem, f) ?? "0").trim();
+            String hex = raw.starts_with("0x") ? raw[2..] : raw;
+            st.flags = hex.to_ulong(16) ?? 0;
         }
 
         stats.push(st);
