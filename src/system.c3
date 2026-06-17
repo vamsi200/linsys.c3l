@@ -74,6 +74,80 @@ struct CpuTemp {
     double critical;
 }
 
+struct PressureMetrics {
+    double avg10;
+    double avg60;
+    double avg300;
+    ulong total;
+}
+
+struct PressureInfo {
+    PressureMetrics some;
+    PressureMetrics full;
+}
+
+fn PressureInfo? parse_psi(String content, String ctx) @private {
+    PressureInfo info;
+    String[] lines = content.split(tmem, "\n");
+
+    foreach (line : lines) {
+        if (line.len == 0) continue;
+
+        String[] fields = linsys::split_whitespace(tmem, line);
+        if (fields.len == 0) continue;
+
+        PressureMetrics* metrics;
+        switch (fields[0]) {
+            case "some": metrics = &info.some;
+            case "full": metrics = &info.full;
+            default: continue;
+        }
+
+        for (int i = 1; i < fields.len; i++) {
+            String[] kv = fields[i].split(tmem, "=");
+            if (kv.len != 2) {
+                linsys::push_error(ctx, linsys::PARSE_ERROR);
+                continue;
+            }
+
+            switch (kv[0]) {
+                case "avg10":
+                    linsys::@try_field(metrics.avg10, kv[1].to_double(), ctx, 0);
+                case "avg60":
+                    linsys::@try_field(metrics.avg60, kv[1].to_double(), ctx, 0);
+                case "avg300":
+                    linsys::@try_field(metrics.avg300, kv[1].to_double(), ctx, 0);
+                case "total":
+                    linsys::@try_field(metrics.total, kv[1].to_ulong(), ctx, 0);
+                default: break;
+            }
+        }
+    }
+
+    return info;
+}
+
+fn PressureInfo? psi_cpu() => @pool() {
+    File file = file::open("/proc/pressure/cpu", "r")!;
+    defer (void)file.close();
+    String content = linsys::read_file(tmem, file)!;
+    return parse_psi(content, "psi_cpu");
+}
+
+fn PressureInfo? psi_memory() => @pool() {
+    File file = file::open("/proc/pressure/memory", "r")!;
+    defer (void)file.close();
+    String content = linsys::read_file(tmem, file)!;
+    return parse_psi(content, "psi_memory");
+}
+
+fn PressureInfo? psi_io() => @pool() {
+    File file = file::open("/proc/pressure/io", "r")!;
+    defer (void)file.close();
+    String content = linsys::read_file(tmem, file)!;
+    return parse_psi(content, "psi_io");
+}
+
 fn SystemCpuTimes? cpu_times() => @pool() {
     File file = file::open("/proc/stat", "r")!;
     defer (void)file.close();
