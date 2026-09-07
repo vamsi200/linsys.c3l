@@ -2,9 +2,9 @@ import std::os;
 import std::io::file;
 import std::collections::list;
 
-faultdef
-    NO_SUCH_PROCESS, PERMISSION_DENIED, PARSE_ERROR, NOT_SUPPORTED, PROCESS_EXITED, IO_ERROR, SCHED_NO_SUCH_PROCESS, SCHED_PERMISSION_DENIED, SCHED_INVALID, NICE_PERMISSION_DENIED, NICE_NO_SUCH_PROCESS, NICE_INVALID, UNKNOWN, NOT_FOUND, PATH_NOT_FOUND
-;
+faultdef NO_SUCH_PROCESS, PERMISSION_DENIED, PARSE_ERROR, NOT_SUPPORTED, PROCESS_EXITED, IO_ERROR, SCHED_NO_SUCH_PROCESS, 
+    SCHED_PERMISSION_DENIED, SCHED_INVALID, NICE_PERMISSION_DENIED, NICE_NO_SUCH_PROCESS, NICE_INVALID, UNKNOWN,
+    NOT_FOUND, PATH_NOT_FOUND, NO_TERMINAL, TERMINAL_NOT_FOUND;
 
 macro void free_slice(slice, Allocator allocator) @private {
     $assert $defined(slice[0].free(allocator)) : "element type must have .free(Allocator)";
@@ -149,15 +149,13 @@ fn String[] split_whitespace(Allocator allocator, String s)  @private {
 fn ulong? read_ulong_file(String path)  @private {
     File file = file::open(path, "r")!;
     defer (void)file.close();
-
     return io::treadline(&file)!.trim().to_ulong();
 }
 
 fn ulong? read_total_cpu_time() @private => @pool() {
 	File file = file::open("/proc/stat", "r")!;
 	defer (void)file.close();
-
-    	String line = linsys::read_file(tmem, file)!;
+  String line = linsys::read_file(tmem, file)!;
 
 	sz i = line.index_of("cpu ")!;
 	if (i == -1) return 0;

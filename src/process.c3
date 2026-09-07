@@ -44,6 +44,7 @@ struct ProcessInfo {
     Process process;
     String exe_path;
     String cmdline;
+    String terminal;
     int uid;
     int gid;
     int threads;
@@ -199,7 +200,15 @@ fn ProcessInfo? info(Allocator allocator, int pid) => @pool() {
 
     linsys::@try_field(proc.exe_path, read_exe(allocator, pid), "exe", "".copy(allocator));
     linsys::@try_field(proc.cmdline, read_cmdline(allocator, pid), "cmdline", "".copy(allocator));
+    linsys::@try_field(
+        proc.terminal,
+        process::terminal(allocator, pid),
+        "terminal",
+        "".copy(allocator)
+    );
+
     proc.process = p;
+
 
     return proc;
 }
@@ -1201,4 +1210,194 @@ fn Process[]? find_by_name(Allocator allocator, String name) => @pool() {
         }
     }
     return result.to_array(allocator);
+}
+
+struct Passwd {
+    char* pw_name;
+    char* pw_passwd;
+    uint pw_uid;
+    uint pw_gid;
+    char* pw_gecos;
+    char* pw_dir;
+    char* pw_shell;
+}
+
+extern fn Passwd* getpwuid(uint uid);
+
+<*
+ @require pid > 0 : "pid must be positive"
+*>
+fn String? username(Allocator allocator, int pid) {
+    if (!exists(pid)) return linsys::NO_SUCH_PROCESS~;
+    ProcessInfo? p = info(allocator, pid);
+    if (catch p) return linsys::UNKNOWN~;
+    return ((ZString)getpwuid((uint)p.uid).pw_name).copy(allocator);
+}
+
+struct Timespec {
+    long tv_sec;
+    long tv_nsec;
+}
+
+struct Stat {
+    ulong st_dev;
+    ulong st_ino;
+    ulong st_nlink;
+    uint st_mode;
+    uint st_uid;
+    uint st_gid;
+    int __pad0;
+    ulong st_rdev;
+    long st_size;
+    long st_blksize;
+    long st_blocks;
+    Timespec st_atim;
+    Timespec st_mtim;
+    Timespec st_ctim;
+    long[3] __glibc_reserved;
+}
+
+extern fn int stat(ZString path, Stat* statbuf) @private;
+
+<*
+ @require pid > 0 : "pid must be positive"
+*>
+fn String? terminal(Allocator allocator, int pid) => @pool() {
+    if (!exists(pid)) return linsys::NO_SUCH_PROCESS~;
+
+    String path = string::tformat("/proc/%d/stat", pid);
+    File? file  = file::open(path, "r");
+
+    if (catch file) return linsys::IO_ERROR~;
+    defer (void)file.close();
+
+    String? content = linsys::read_file(tmem, file);
+    if (catch content) return linsys::IO_ERROR~;
+
+    String[] fields = parse_proc_stat_fields(allocator, content)!;
+    int tty_nr      = fields[4].to_int()!;
+
+    if (tty_nr == 0) return linsys::NO_TERMINAL~;
+
+    Stat stat;
+    PathList list = io::path::ls(tmem, (Path)"/dev/pts/")!;
+
+    foreach (l : list) {
+        String device = string::tformat("/dev/pts/%s", l);
+        if (process::stat((ZString)device, &stat) != 0) continue;
+        if (stat.st_rdev == (ulong)tty_nr) return device.copy(allocator);
+    }
+
+    foreach (l : io::path::ls(tmem, (Path)"/dev/")!) {
+        if (!l.contains("tty")) continue;
+        String device = string::tformat("/dev/%s", l);
+        io::printn(device);
+        if (process::stat((ZString)device, &stat) != 0) continue;
+        if (stat.st_rdev == (ulong)tty_nr) return device.copy(allocator);
+    }
+
+    return linsys::TERMINAL_NOT_FOUND~;
+}
+
+struct MemoryFullInfo {
+    ulong rss;
+    ulong vms;
+    ulong shared;
+    ulong text;
+    ulong lib;
+    ulong data;
+    ulong dirty;
+    ulong uss;
+    ulong pss;
+    ulong swap;
+}
+
+<*
+ @require pid > 0 : "pid must be positive"
+*>
+fn MemoryFullInfo[]? memory_full_info(Allocator allocator, int pid) => @pool() {
+    abort("");
+}
+
+struct PageFault {
+    int minor;
+    int major;
+}
+
+<*
+ @require pid > 0 : "pid must be positive"
+*>
+fn PageFault? page_fault(int pid) => @pool() {
+    abort("");
+}
+
+struct CtxSwitches {
+    int voluntary;
+    int involuntary;
+}
+
+<*
+ @require pid > 0 : "pid must be positive"
+*>
+fn CtxSwitches? ctx_switches(int pid) => @pool() {
+    abort("");
+}
+
+struct ProcessCgroup {
+    String path;
+    String name;
+}
+
+fn ProcessCgroup? cgroup() => @pool() {
+    abort("");
+}
+
+struct Namespace {
+    NamespaceType type;
+    ulong inode;
+}
+
+enum NamespaceType {
+    PID,
+    MOUNT,
+    NET,
+    IPC,
+    UTS,
+    USER,
+    CGROUP,
+    TIME,
+}
+
+fn Namespace? namespace(int pid, NamespaceType type) => @pool() {
+    abort("");
+}
+fn Namespace[] namespaces(int pid) => @pool() {
+    abort("");
+}
+
+struct SchedulingInfo {
+    SchedulingPolicy policy;
+    int priority;
+}
+
+enum SchedulingPolicy {
+    OTHER,
+    FIFO,
+    RR,
+    BATCH,
+    IDLE,
+    DEADLINE,
+}
+
+// int sched_setscheduler(pid_t pid, int policy, const struct sched_param *param);
+// int sched_getscheduler(pid_t pid);
+
+struct SchedStat {
+    ulong run_time_ns;
+    ulong runqueue_wait_ns;
+    ulong timeslices;
+}
+
+fn SchedStat? sched_stat(int pid) => @pool() {
+    abort("");
 }

@@ -785,3 +785,41 @@ fn ulong? read_clktck() @private {
     }
     return 100;
 }
+
+struct Users {
+    String name;
+    String terminal;
+    String host;
+    float started;
+    int pid;
+}
+
+fn Users users(Allocator allocator) => @pool() {
+    abort("");
+}
+
+// Will need to split Cgroups, if it becomes fairly large
+struct Cgroup {
+    String path;
+    String name;
+    String[] controllers;
+}
+
+struct CgroupInfo {
+    String path;
+
+    ulong memory_current;
+    ulong memory_max;
+
+    ulong cpu_usage;
+    ulong pids_current;
+    ulong pids_max;
+}
+
+fn Cgroup[] cgroups() => @pool() {
+    abort("");
+}
+
+fn CgroupInfo? cgroup_info() => @pool() {
+    abort("");
+}
