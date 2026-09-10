@@ -515,7 +515,7 @@ fn String flags_to_mode(int flags, Allocator allocator) @private => @pool() {
         { 0o100000, "largefile" }, // O_LARGEFILE
         { 0o1000000, "noatime" }, // O_NOATIME
         { 0o2000000, "cloexec" }, // O_CLOEXEC
-        };
+    };
 
     DString result = dstring::new_with_capacity(tmem, 32);
 
@@ -663,11 +663,13 @@ fn void? read_connections(
                 .local_addr = is_v6 ? linsys::ip_to_string_v6(
                     allocator,
                     linsys::parse_addr6(raw[1][:colon_l])
-                ) : linsys::ip_to_string(allocator, linsys::parse_addr(raw[1][:colon_l])),
+                )
+                    : linsys::ip_to_string(allocator, linsys::parse_addr(raw[1][:colon_l])),
                 .remote_addr = is_v6 ? linsys::ip_to_string_v6(
                     allocator,
                     linsys::parse_addr6(raw[2][:colon_r])
-                ) : linsys::ip_to_string(allocator, linsys::parse_addr(raw[2][:colon_r])),
+                )
+                    : linsys::ip_to_string(allocator, linsys::parse_addr(raw[2][:colon_r])),
                 .local_port = lp,
                 .remote_port = rp,
                 .state = linsys::tcp_state(raw[3]),
@@ -798,7 +800,10 @@ fn CpuTimes? cpu_times_threads(int pid, int tid) => @pool() {
  @require pid > 0 : "pid must be positive"
 *>
 fn ProcessPoller? poller(int pid) {
-    return { .pid = pid, .last_snapshot = cpu_snapshot(pid)!, };
+    return {
+        .pid = pid,
+        .last_snapshot = cpu_snapshot(pid)!,
+    };
 }
 
 fn double? ProcessPoller.cpu_percent(&self) {
@@ -1312,11 +1317,136 @@ struct MemoryFullInfo {
     ulong swap;
 }
 
+const _SC_PAGESIZE = 30; // TODO: VERIFY THIS
+
+fn ulong get_page_size() @private {
+    CLong page_size = os::posix::sysconf(_SC_PAGESIZE);
+    return (ulong)page_size;
+}
+
+fn String? read_vms_file(Allocator allocator, int pid) @private => @pool() {
+    String path = string::tformat("/proc/%d/statm", pid);
+    File? file  = file::open(path, "r");
+    if (catch file) return linsys::IO_ERROR~;
+
+    return linsys::read_file(allocator, file).copy(allocator).trim();
+}
+
+fn MemoryFullInfo? read_statm(MemoryFullInfo* mfi, int pid) @private => @pool() {
+    String statm    = read_vms_file(tmem, pid)!!;
+    String[] fields = statm.split(tmem, " ");
+
+    if (fields.len < 7) return linsys::IO_ERROR~;
+
+    ulong page_size = get_page_size();
+
+    linsys::@try_field_append(
+        mfi.vms,
+        fields[0].to_ulong() * page_size,
+        "memory_full_info::Vms",
+        0
+    );
+
+    linsys::@try_field_append(
+        mfi.rss,
+        fields[1].to_ulong() * page_size,
+        "memory_full_info::Rss",
+        0
+    );
+
+    linsys::@try_field_append(
+        mfi.shared,
+        fields[2].to_ulong() * page_size,
+        "memory_full_info::Shared",
+        0
+    );
+
+    linsys::@try_field_append(
+        mfi.text,
+        fields[3].to_ulong() * page_size,
+        "memory_full_info::Text",
+        0
+    );
+
+    linsys::@try_field_append(
+        mfi.lib,
+        fields[4].to_ulong() * page_size,
+        "memory_full_info::Lib",
+        0
+    );
+
+    linsys::@try_field_append(
+        mfi.data,
+        fields[5].to_ulong() * page_size,
+        "memory_full_info::Data",
+        0
+    );
+
+    linsys::@try_field_append(
+        mfi.dirty,
+        fields[6].to_ulong() * page_size,
+        "memory_full_info::Dirty",
+        0
+    );
+
+    return *mfi;
+}
+
 <*
  @require pid > 0 : "pid must be positive"
 *>
-fn MemoryFullInfo[]? memory_full_info(Allocator allocator, int pid) => @pool() {
-    abort("");
+fn MemoryFullInfo? memory_full_info(int pid) => @pool() {
+    MemoryFullInfo mfi;
+
+    read_statm(&mfi, pid)!!;
+
+    String path = string::tformat("/proc/%d/smaps", pid);
+    File? file  = file::open(path, "r");
+    if (catch file) return linsys::IO_ERROR~;
+
+    while (try line = io::treadline(&file)) {
+        sz? idx = line.index_of_char(':');
+        if (catch idx) continue;
+
+        String key   = line[:idx].trim();
+        String value = line[idx + 1..].trim_right("kB").trim();
+
+        switch (key) {
+            case "Private_Clean":
+                linsys::@try_field_append(
+                    mfi.uss,
+                    value.to_ulong() * 1024,
+                    "memory_full_info::Uss",
+                    0
+                );
+
+            case "Private_Dirty":
+                linsys::@try_field_append(
+                    mfi.uss,
+                    value.to_ulong() * 1024,
+                    "memory_full_info::Uss",
+                    0
+                );
+
+            case "Pss":
+                linsys::@try_field_append(
+                    mfi.pss,
+                    value.to_ulong() * 1024,
+                    "memory_full_info::Pss",
+                    0
+                );
+
+            case "Swap":
+                linsys::@try_field_append(
+                    mfi.swap,
+                    value.to_ulong() * 1024,
+                    "memory_full_info::Swap",
+                    0
+                );
+        }
+    }
+
+    return mfi;
 }
 
 struct PageFault {
@@ -1328,7 +1458,25 @@ struct PageFault {
  @require pid > 0 : "pid must be positive"
 *>
 fn PageFault? page_fault(int pid) => @pool() {
-    abort("");
+    if (!exists(pid)) return linsys::NO_SUCH_PROCESS~;
+
+    String path = string::tformat("/proc/%d/stat", pid);
+    File? file  = file::open(path, "r");
+
+    if (catch file) return linsys::IO_ERROR~;
+    defer (void)file.close();
+
+    String? content = linsys::read_file(tmem, file);
+    if (catch content) return linsys::IO_ERROR~;
+
+    String[] fields = parse_proc_stat_fields(tmem, content)!;
+
+    PageFault pf;
+
+    linsys::@try_field(pf.minor, fields[7].to_int(), "page_fault::minor", 0);
+    linsys::@try_field(pf.major, fields[9].to_int(), "page_fault::major", 0);
+
+    return pf;
 }
 
 struct CtxSwitches {
@@ -1340,16 +1488,83 @@ struct CtxSwitches {
  @require pid > 0 : "pid must be positive"
 *>
 fn CtxSwitches? ctx_switches(int pid) => @pool() {
-    abort("");
+    String path = string::tformat("/proc/%d/status", pid);
+    File? file  = file::open(path, "r");
+    if (catch file) return linsys::IO_ERROR~;
+
+    CtxSwitches switches;
+
+    while (try line = io::treadline(&file)) {
+        sz? idx = line.index_of_char(':');
+        if (catch idx) continue;
+
+        String key   = line[:idx].trim();
+        String value = line[idx + 1..].trim();
+
+        switch (key) {
+            case "voluntary_ctxt_switches":
+                linsys::@try_field_append(
+                    switches.voluntary,
+                    value.to_int(),
+                    "ctx_switches::voluntary",
+                    0
+                );
+
+            case "nonvoluntary_ctxt_switches":
+                linsys::@try_field_append(
+                    switches.involuntary,
+                    value.to_int(),
+                    "ctx_switches::involuntary",
+                    0
+                );
+        }
+    }
+
+    return switches;
 }
 
 struct ProcessCgroup {
+    String controllers;
     String path;
     String name;
 }
 
-fn ProcessCgroup? cgroup() => @pool() {
-    abort("");
+// TODO: Recheck this
+<*
+ @require pid > 0 : "pid must be positive"
+*>
+fn ProcessCgroup? cgroup(Allocator allocator, int pid) => @pool() {
+    String path = string::tformat("/proc/%d/cgroup", pid);
+
+    File? file = file::open(path, "r");
+    if (catch file) return linsys::IO_ERROR~;
+
+    while (try line = io::treadline(&file)) {
+        line = line.trim();
+
+        String[] fields = line.split(tmem, ":");
+        if (fields.len < 3) continue;
+
+        String controller  = fields[1].trim();
+        String cgroup_path = fields[2].trim();
+
+        if (cgroup_path.len == 0) continue;
+
+        ProcessCgroup result;
+        result.controllers = controller.copy(allocator);
+        result.path = cgroup_path.copy(allocator);
+
+        sz? slash = cgroup_path.rindex_of_char('/');
+        if (catch slash) {
+            result.name = cgroup_path.copy(allocator);
+        } else {
+            result.name = cgroup_path[slash + 1..].copy(allocator);
+        }
+
+        return result;
+    }
+
+    return linsys::IO_ERROR~;
 }
 
 struct Namespace {
@@ -1368,11 +1583,64 @@ enum NamespaceType {
     TIME,
 }
 
-fn Namespace? namespace(int pid, NamespaceType type) => @pool() {
-    abort("");
+fn Namespace? namespace(Allocator allocator, int pid, NamespaceType type) => @pool() {
+    String name;
+
+    switch (type) {
+        case NamespaceType.PID: name = "pid";
+        case NamespaceType.MOUNT: name = "mnt";
+        case NamespaceType.NET: name = "net";
+        case NamespaceType.IPC: name = "ipc";
+        case NamespaceType.UTS: name = "uts";
+        case NamespaceType.USER: name = "user";
+        case NamespaceType.CGROUP: name = "cgroup";
+        case NamespaceType.TIME: name = "time";
+    }
+
+    String path = string::tformat("/proc/%d/ns/%s", pid, name);
+
+    String? target = process::readlink_alloc(allocator, (ZString)path);
+    if (catch target) return linsys::READ_LINK_ERROR~;
+
+    sz? start = target.index_of_char('[');
+    if (catch start) return linsys::IO_ERROR~;
+
+    sz? end = target.index_of_char(']');
+    if (catch end) return linsys::IO_ERROR~;
+
+    ulong inode = target[start + 1..end - 1].to_ulong()!;
+
+    Namespace result;
+    result.type = type;
+    result.inode = inode;
+
+    return result;
 }
-fn Namespace[] namespaces(int pid) => @pool() {
-    abort("");
+
+fn Namespace[] namespaces(Allocator allocator, int pid) => @pool() {
+    List{Namespace} result;
+    result.init(allocator);
+    defer result.free();
+
+    NamespaceType[] types = {
+        NamespaceType.PID,
+        NamespaceType.MOUNT,
+        NamespaceType.NET,
+        NamespaceType.IPC,
+        NamespaceType.UTS,
+        NamespaceType.USER,
+        NamespaceType.CGROUP,
+        NamespaceType.TIME,
+    };
+
+    foreach (type : types) {
+        Namespace? ns = namespace(allocator, pid, type);
+        if (catch ns) continue;
+
+        result.push(ns);
+    }
+
+    return result.to_array(allocator);
 }
 
 struct SchedulingInfo {
@@ -1389,8 +1657,79 @@ enum SchedulingPolicy {
     DEADLINE,
 }
 
-// int sched_setscheduler(pid_t pid, int policy, const struct sched_param *param);
-// int sched_getscheduler(pid_t pid);
+struct SchedParam {
+    int sched_priority;
+}
+
+extern fn int sched_getscheduler(int pid);
+extern fn int sched_setscheduler(int pid, int policy, SchedParam* param);
+extern fn int sched_getparam(int pid, SchedParam* param);
+extern fn int sched_setparam(int pid, SchedParam* param);
+
+extern fn int sched_get_priority_max(int policy);
+extern fn int sched_get_priority_min(int policy);
+extern fn int sched_rr_get_interval(int pid, Timespec* interval);
+
+fn SchedulingInfo? scheduling(int pid) => @pool() {
+    int policy = sched_getscheduler(pid);
+    if (policy < 0) return linsys::IO_ERROR~;
+
+    SchedParam param;
+    if (sched_getparam(pid, &param) != 0) return linsys::IO_ERROR~;
+
+    SchedulingInfo result;
+    result.policy = (SchedulingPolicy)policy;
+    result.priority = param.sched_priority;
+
+    return result;
+}
+
+fn void? set_scheduling(int pid, SchedulingPolicy policy, int priority) => @pool() {
+    PriorityRange range = priority_range(policy)!;
+
+    if (priority < range.min || priority > range.max) return linsys::INVALID_ARGUMENT~;
+
+    SchedParam param;
+    param.sched_priority = priority;
+
+    if (sched_setscheduler(pid, (int)policy, &param) != 0) {
+        return linsys::IO_ERROR~;
+    }
+}
+
+struct PriorityRange {
+    int min;
+    int max;
+}
+
+fn PriorityRange? priority_range(SchedulingPolicy policy) => @pool() {
+    int min = sched_get_priority_min((int)policy);
+    if (min < 0) return linsys::IO_ERROR~;
+
+    int max = sched_get_priority_max((int)policy);
+    if (max < 0) return linsys::IO_ERROR~;
+
+    PriorityRange result;
+    result.min = min;
+    result.max = max;
+
+    return result;
+}
+
+fn void? set_priority(int pid, int priority) => @pool() {
+    SchedParam param;
+    param.sched_priority = priority;
+
+    if (sched_setparam(pid, &param) != 0) return linsys::IO_ERROR~;
+}
+
+fn Timespec? rr_interval(int pid) => @pool() {
+    Timespec interval;
+
+    if (sched_rr_get_interval(pid, &interval) != 0) return linsys::IO_ERROR~;
+
+    return interval;
+}
 
 struct SchedStat {
     ulong run_time_ns;
@@ -1399,5 +1738,34 @@ struct SchedStat {
 }
 
 fn SchedStat? sched_stat(int pid) => @pool() {
-    abort("");
+    String path = string::tformat("/proc/%d/schedstat", pid);
+
+    File? file = file::open(path, "r");
+    if (catch file) return linsys::IO_ERROR~;
+
+    String? line = io::treadline(&file);
+    if (catch line) return linsys::IO_ERROR~;
+
+    String[] fields = linsys::split_whitespace(tmem, line);
+
+    if (fields.len < 3) return linsys::IO_ERROR~;
+
+    SchedStat result;
+    linsys::@try_field(
+        result.run_time_ns,
+        fields[0].to_ulong(),
+        "sched_stat::run_time_ns",
+        0
+    );
+
+    linsys::@try_field(
+        result.runqueue_wait_ns,
+        fields[1].to_ulong(),
+        "sched_stat::runqueue_wait_ns",
+        0
+    );
+
+    linsys::@try_field(result.timeslices, fields[2].to_ulong(), "sched_stat::timeslices", 0);
+
+    return result;
 }
