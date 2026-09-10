@@ -313,7 +313,10 @@ fn SystemCpuSnapshot? cpu_snapshot() => @pool() {
         // io_wait also included..
         if (fields.len > 5) idle += fields[5].to_ulong()!;
 
-        return { .total = total, .idle = idle, };
+        return {
+            .total = total,
+            .idle = idle,
+        };
     }
 
     return linsys::PARSE_ERROR~;
@@ -431,7 +434,10 @@ fn CpuCount? cpu_count() {
             }
         }
 
-        return { .logical = logical, .physical = (int)physical_ids.len(), };
+        return {
+            .logical = logical,
+            .physical = (int)physical_ids.len(),
+        };
     };
 }
 
@@ -668,7 +674,13 @@ fn CpuTemp[]? cpu_temps(Allocator allocator) => @pool() {
 
         String sensor = linsys::read_file(tmem, ty)!.trim().copy(allocator);
 
-        temps.push({ .sensor = sensor, .current = current, .critical = 0.0, });
+        temps.push(
+            {
+                .sensor = sensor,
+                .current = current,
+                .critical = 0.0,
+            }
+        );
     }
 
     return temps.to_array(allocator);
@@ -790,12 +802,69 @@ struct Users {
     String name;
     String terminal;
     String host;
-    float started;
+    long started;
     int pid;
 }
 
-fn Users users(Allocator allocator) => @pool() {
-    abort("");
+struct Timeval {
+    long tv_sec;
+    long tv_usec;
+}
+
+struct Utmp {
+    short type;
+    int pid;
+    char[32] line;
+    char[4] id;
+    char[32] user;
+    char[256] host;
+    int exit_status;
+    int session;
+    Timeval tv;
+    int[4] addr_v6;
+    char[20] reserved;
+}
+
+extern fn void setutent();
+extern fn Utmp* getutent();
+extern fn void endutent();
+
+fn String? utmp_string(char* value, sz capacity, Allocator allocator) @private => @pool() {
+    sz len = 0;
+
+    while (len < capacity && value[len] != 0) {
+        len++;
+    }
+
+    return ((String)value[..len]).copy(allocator);
+}
+
+fn Users[] users(Allocator allocator) => @pool() {
+    List{Users} result;
+    result.init(allocator);
+    defer result.free();
+
+    setutent();
+    defer endutent();
+
+    while (true) {
+        Utmp* entry = getutent();
+        if (entry == null) break;
+
+        if (entry.type != 7) continue;
+
+        Users user;
+
+        user.name = utmp_string(&entry.user, 32, allocator)!!;
+        user.terminal = utmp_string(&entry.line, 32, allocator)!!;
+        user.host = utmp_string(&entry.host, 256, allocator)!!;
+        user.started = (long)entry.tv.tv_sec;
+        user.pid = entry.pid;
+
+        result.push(user);
+    }
+
+    return result.to_array(allocator);
 }
 
 // Will need to split Cgroups, if it becomes fairly large
@@ -816,10 +885,62 @@ struct CgroupInfo {
     ulong pids_max;
 }
 
-fn Cgroup[] cgroups() => @pool() {
-    abort("");
+fn void cgroup_walk(Allocator allocator, String path, List{Cgroup}* result) @private => @pool() {
+    PathList entries = io::path::ls(allocator, (Path)path)!!;
+
+    foreach (entry : entries) {
+        String child = string::tformat("%s/%s", path, entry);
+
+        if (!path::is_dir((Path)child)) continue;
+
+        String controllers_path =
+            string::tformat("%s/cgroup.controllers", child);
+
+        List{String} controllers;
+        controllers.init(allocator);
+        defer controllers.free();
+
+        File? file = file::open(controllers_path, "r");
+
+        if (try f = file) {
+            if (try line = io::treadline(&f)) {
+                String[] fields = linsys::split_whitespace(tmem, line);
+
+                foreach (field : fields) {
+                    controllers.push(field.copy(allocator));
+                }
+            }
+        }
+
+        Cgroup group;
+
+        group.path = child.copy(allocator);
+
+        sz? slash = child.rindex_of_char('/');
+        if (catch slash) {
+            group.name = child.copy(allocator);
+        } else {
+            group.name = child[slash + 1..].copy(allocator);
+        }
+
+        group.controllers = controllers.to_array(allocator);
+
+        result.push(group);
+
+        cgroup_walk(allocator, child, result);
+    }
 }
 
-fn CgroupInfo? cgroup_info() => @pool() {
+fn Cgroup[] cgroups(Allocator allocator) => @pool() {
+    List{Cgroup} result;
+    result.init(allocator);
+    defer result.free();
+
+    cgroup_walk(allocator, "/sys/fs/cgroup", &result);
+
+    return result.to_array(allocator);
+}
+
+fn CgroupInfo? cgroup_info(Allocator allocator) => @pool() {
     abort("");
 }

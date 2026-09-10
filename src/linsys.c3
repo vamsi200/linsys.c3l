@@ -4,7 +4,7 @@ import std::collections::list;
 
 faultdef NO_SUCH_PROCESS, PERMISSION_DENIED, PARSE_ERROR, NOT_SUPPORTED, PROCESS_EXITED, IO_ERROR, SCHED_NO_SUCH_PROCESS, 
     SCHED_PERMISSION_DENIED, SCHED_INVALID, NICE_PERMISSION_DENIED, NICE_NO_SUCH_PROCESS, NICE_INVALID, UNKNOWN,
-    NOT_FOUND, PATH_NOT_FOUND, NO_TERMINAL, TERMINAL_NOT_FOUND;
+    NOT_FOUND, PATH_NOT_FOUND, NO_TERMINAL, TERMINAL_NOT_FOUND, READ_LINK_ERROR, INVALID_ARGUMENT;
 
 macro void free_slice(slice, Allocator allocator) @private {
     $assert $defined(slice[0].free(allocator)) : "element type must have .free(Allocator)";
@@ -65,6 +65,16 @@ macro void @try_field(#v, #expr, String field, #fallback) {
         #v = #fallback;
     } else {
         #v = res;
+    }
+}
+
+macro void @try_field_append(#v, #expr, String field, #fallback) {
+    var res = #expr;
+    if (catch err = res) {
+        linsys::push_error(field, err);
+        #v = #fallback;
+    } else {
+        #v += res;
     }
 }
 
