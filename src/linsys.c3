@@ -26,7 +26,6 @@ struct FieldError {
 }
 
 alias ErrorList = List { FieldError };
-tlocal ErrorList* field_errors = null;
 tlocal ErrorContext error_ctx_storage;
 
 struct ErrorContext {

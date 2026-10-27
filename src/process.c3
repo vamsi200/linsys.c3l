@@ -202,7 +202,7 @@ fn ProcessInfo? info(Allocator allocator, int pid) => @pool() {
     linsys::@try_field(proc.cmdline, read_cmdline(allocator, pid), "cmdline", "".copy(allocator));
     linsys::@try_field(
         proc.terminal,
-        process::terminal(allocator, pid),
+        terminal(allocator, pid),
         "terminal",
         "".copy(allocator)
     );
@@ -1279,7 +1279,7 @@ fn String? terminal(Allocator allocator, int pid) => @pool() {
     String? content = linsys::read_file(tmem, file);
     if (catch content) return linsys::IO_ERROR~;
 
-    String[] fields = parse_proc_stat_fields(allocator, content)!;
+    String[] fields = parse_proc_stat_fields(tmem, content)!;
     int tty_nr      = fields[4].to_int()!;
 
     if (tty_nr == 0) return linsys::NO_TERMINAL~;
@@ -1296,7 +1296,6 @@ fn String? terminal(Allocator allocator, int pid) => @pool() {
     foreach (l : io::path::ls(tmem, (Path)"/dev/")!) {
         if (!l.contains("tty")) continue;
         String device = string::tformat("/dev/%s", l);
-        io::printn(device);
         if (process::stat((ZString)device, &stat) != 0) continue;
         if (stat.st_rdev == (ulong)tty_nr) return device.copy(allocator);
     }
