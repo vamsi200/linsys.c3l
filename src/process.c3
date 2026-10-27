@@ -29,6 +29,7 @@ enum ProcState {
     PARKED,
     WAKE_KILL,
     WAKING,
+    UNKNOWN
 }
 
 struct MemoryMap {
@@ -231,7 +232,7 @@ fn ProcState proc_state(char c) @private {
         case 'P': return ProcState.PARKED;
         case 'K': return ProcState.WAKE_KILL;
         case 'W': return ProcState.WAKING;
-        default: return ProcState.RUNNING;
+        default: return ProcState.UNKNOWN;
     }
 }
 
@@ -280,7 +281,7 @@ fn void Process.free(self, Allocator allocator) => linsys::free_fields(self, all
 <*
  @require pid > 0 : "pid must be positive"
 *>
-fn String? read_cmdline(Allocator allocator, int pid) {
+fn String? read_cmdline(Allocator allocator, int pid) => @pool() {
     String path = string::tformat("/proc/%d/cmdline", pid);
     File file   = file::open(path, "r")!;
     defer (void)file.close();
@@ -706,13 +707,13 @@ fn double? create_time(int pid) => @pool() {
     File file = file::open(p, "r")!;
     defer (void)file.close();
 
-    double start_time;
     String raw      = linsys::read_file(tmem, file)!;
     sz rp           = raw.rindex_of(")")!;
     String after    = raw[(rp + 2)..];
     String[] fields = parse_proc_stat_fields(tmem, raw)!;
 
     if (fields.len < 20) return linsys::PARSE_ERROR~;
+    double start_time;
     if (try ulong val = fields[19].to_ulong()) {
         ulong btime = system::boot_time();
         ulong clk   = system::clktck();
@@ -1232,9 +1233,9 @@ extern fn Passwd* getpwuid(uint uid);
 <*
  @require pid > 0 : "pid must be positive"
 *>
-fn String? username(Allocator allocator, int pid) {
+fn String? username(Allocator allocator, int pid) => @pool(){
     if (!exists(pid)) return linsys::NO_SUCH_PROCESS~;
-    ProcessInfo? p = info(allocator, pid);
+    ProcessInfo? p = info(tmem, pid);
     if (catch p) return linsys::UNKNOWN~;
     return ((ZString)getpwuid((uint)p.uid).pw_name).copy(allocator);
 }
@@ -1326,6 +1327,7 @@ fn ulong get_page_size() @private {
 fn String? read_vms_file(Allocator allocator, int pid) @private => @pool() {
     String path = string::tformat("/proc/%d/statm", pid);
     File? file  = file::open(path, "r");
+    defer (void)file.close();
     if (catch file) return linsys::IO_ERROR~;
 
     return linsys::read_file(allocator, file).copy(allocator).trim();
@@ -1401,6 +1403,8 @@ fn MemoryFullInfo? memory_full_info(int pid) => @pool() {
 
     String path = string::tformat("/proc/%d/smaps", pid);
     File? file  = file::open(path, "r");
+    defer (void)file.close();
+
     if (catch file) return linsys::IO_ERROR~;
 
     while (try line = io::treadline(&file)) {
@@ -1489,6 +1493,8 @@ struct CtxSwitches {
 fn CtxSwitches? ctx_switches(int pid) => @pool() {
     String path = string::tformat("/proc/%d/status", pid);
     File? file  = file::open(path, "r");
+    defer (void)file.close();
+
     if (catch file) return linsys::IO_ERROR~;
 
     CtxSwitches switches;
@@ -1536,6 +1542,8 @@ fn ProcessCgroup? cgroup(Allocator allocator, int pid) => @pool() {
     String path = string::tformat("/proc/%d/cgroup", pid);
 
     File? file = file::open(path, "r");
+    defer (void)file.close();
+
     if (catch file) return linsys::IO_ERROR~;
 
     while (try line = io::treadline(&file)) {
@@ -1598,7 +1606,7 @@ fn Namespace? namespace(Allocator allocator, int pid, NamespaceType type) => @po
 
     String path = string::tformat("/proc/%d/ns/%s", pid, name);
 
-    String? target = process::readlink_alloc(allocator, (ZString)path);
+    String? target = process::readlink_alloc(tmem, (ZString)path);
     if (catch target) return linsys::READ_LINK_ERROR~;
 
     sz? start = target.index_of_char('[');
@@ -1647,13 +1655,13 @@ struct SchedulingInfo {
     int priority;
 }
 
-enum SchedulingPolicy {
-    OTHER,
-    FIFO,
-    RR,
-    BATCH,
-    IDLE,
-    DEADLINE,
+constdef SchedulingPolicy : CInt {
+    OTHER = 0,
+    FIFO = 1,
+    RR = 2,
+    BATCH = 3,
+    IDLE = 5,
+    DEADLINE = 6,
 }
 
 struct SchedParam {

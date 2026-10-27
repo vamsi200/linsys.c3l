@@ -885,8 +885,9 @@ struct CgroupInfo {
     ulong pids_max;
 }
 
-fn void cgroup_walk(Allocator allocator, String path, List{Cgroup}* result) @private => @pool() {
-    PathList entries = io::path::ls(allocator, (Path)path)!!;
+fn void? cgroup_walk(Allocator allocator, String path, List{Cgroup}* result) @private => @pool() {
+    PathList? entries = io::path::ls(tmem, (Path)path)!;
+    if (catch entries) return linsys::IO_ERROR~;
 
     foreach (entry : entries) {
         String child = string::tformat("%s/%s", path, entry);
@@ -901,6 +902,7 @@ fn void cgroup_walk(Allocator allocator, String path, List{Cgroup}* result) @pri
         defer controllers.free();
 
         File? file = file::open(controllers_path, "r");
+        defer (void)file.close();
 
         if (try f = file) {
             if (try line = io::treadline(&f)) {
@@ -927,16 +929,25 @@ fn void cgroup_walk(Allocator allocator, String path, List{Cgroup}* result) @pri
 
         result.push(group);
 
-        cgroup_walk(allocator, child, result);
+        cgroup_walk(allocator, child, result)!;
     }
 }
 
-fn Cgroup[] cgroups(Allocator allocator) => @pool() {
+fn void Cgroup[].free(self, Allocator allocator) => linsys::free_slice(self, allocator);
+fn void Cgroup.free(self, Allocator allocator) => linsys::free_fields(self, allocator);
+
+fn Cgroup[]? cgroups(Allocator allocator) => @pool() {
     List{Cgroup} result;
     result.init(allocator);
-    defer result.free();
 
-    cgroup_walk(allocator, "/sys/fs/cgroup", &result);
+    defer {
+        foreach (group : result) {
+            group.free(allocator);
+        }
+        result.free();
+    }
+
+    cgroup_walk(allocator, "/sys/fs/cgroup", &result)!;
 
     return result.to_array(allocator);
 }

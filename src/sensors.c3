@@ -75,7 +75,13 @@ fn void? parse_sensor_temperatures(
             critical = (double)crit_raw / 1000.0;
         }
 
-        out.push({ .name = p.name, .current = current, .critical = critical, });
+        out.push(
+            {
+                .name = p.name,
+                .current = current,
+                .critical = critical,
+            }
+        );
     }
 }
 
@@ -110,7 +116,9 @@ fn SensorPath[]? get_sensor_paths(Allocator allocator) @private => @pool() {
             }
 
             paths.push(
-                { .input = input.copy(allocator), .crit = string::tformat("%s/temp%d_crit", base, i)
+                {
+                    .input = input.copy(allocator),
+                    .crit = string::tformat("%s/temp%d_crit", base, i)
                 .copy(
                     allocator
                 ), .name = string::format(allocator, "%s-temp%d", sensor_name, i), });
@@ -124,7 +132,7 @@ fn void SensorPath.free(self, Allocator allocator) => linsys::free_fields(self, 
 
 fn SensorTemperature[]? temperatures(Allocator allocator) => @pool() {
     SensorPath[] paths = get_sensor_paths(allocator)!;
-    linsys::free_slice(paths, allocator);
+    defer linsys::free_slice(paths, allocator);
 
     List{SensorTemperature} out;
     out.init(allocator);
@@ -146,7 +154,11 @@ struct SensorPoller {
 fn SensorPoller? sensor_poller(Allocator allocator) {
     List{SensorTemperature} list;
     list.init(allocator);
-    return { .paths = get_sensor_paths(allocator)!, .list = list, .allocator = allocator, };
+    return {
+        .paths = get_sensor_paths(allocator)!,
+        .list = list,
+        .allocator = allocator,
+    };
 }
 
 fn void SensorPoller.close(&self) {
@@ -205,14 +217,26 @@ fn FanPath[]? find_fan_paths(Allocator allocator) @private => @pool() {
     return paths.to_array(allocator);
 }
 
-fn void? parse_sensor_fans(Allocator allocator, FanPath[] paths, List{SensorFan}* out) @private {
+fn void? parse_sensor_fans(
+    Allocator allocator,
+    FanPath[] paths,
+    List{SensorFan}* out,
+    bool copy_names
+) @private {
     foreach (p : paths) {
         ulong? raw = linsys::read_ulong_file(p.input);
+
         if (catch raw) {
             linsys::push_error("sensor_fans::line", linsys::PARSE_ERROR);
             continue;
         }
-        out.push({ .name = p.name.copy(allocator), .current = (int)raw, });
+
+        out.push(
+            {
+                .name = copy_names ? p.name.copy(allocator) : p.name,
+                .current = (int)raw,
+            }
+        );
     }
 }
 
@@ -220,12 +244,12 @@ fn void FanPath.free(self, Allocator allocator) => linsys::free_fields(self, all
 
 fn SensorFan[]? fans(Allocator allocator) => @pool() {
     FanPath[] paths = find_fan_paths(allocator)!;
-    linsys::free_slice(paths, allocator);
+    defer linsys::free_slice(paths, allocator);
 
     List{SensorFan} out;
     out.init(allocator);
     defer out.free();
-    parse_sensor_fans(allocator, paths, &out)!;
+    parse_sensor_fans(allocator, paths, &out, true)!;
     return out.to_array(allocator);
 }
 
@@ -241,7 +265,11 @@ struct FanPoller {
 fn FanPoller? fan_poller(Allocator allocator) {
     List{SensorFan} list;
     list.init(allocator, 8);
-    return { .paths = find_fan_paths(allocator)!, .list = list, .allocator = allocator, };
+    return {
+        .paths = find_fan_paths(allocator)!,
+        .list = list,
+        .allocator = allocator,
+    };
 }
 
 fn void FanPoller.close(&self) {
@@ -255,8 +283,8 @@ fn void FanPoller.close(&self) {
 
 macro void? FanPoller.@poll(&self; @body(fp)) {
     self.list.clear();
-    parse_sensor_fans(self.allocator, self.paths, &self.list)!;
-    return @body(self.list.to_array(self.allocator));
+    parse_sensor_fans(self.allocator, self.paths, &self.list, false)!;
+    return @body(self.list.array_view());
 }
 
 fn SensorBattery[]? batteries(Allocator allocator) {

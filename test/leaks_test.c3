@@ -296,6 +296,13 @@ fn void test_sensor_poller() @test {
 fn void test_fan_poller() @test {
     @tracker(; Allocator alloc) {
         FanPoller poller = sensors::fan_poller(alloc)!!;
+
+        for (int i = 0; i < 100; i++) {
+            poller.@poll(; SensorFan[] sf) {
+                assert(sf.len > 0);
+            }!!;
+        }
+
         poller.close();
     };
 }
