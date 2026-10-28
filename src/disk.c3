@@ -70,7 +70,7 @@ fn DiskPartition[]? partitions(Allocator allocator) => @pool() {
             continue;
         }
 
-        String[] fields = linsys::split_whitespace(tmem, line);
+        String[] fields = linsys::split_whitespace(line);
         if (fields.len < 4) {
             linsys::push_error("diskpartition::line", linsys::PARSE_ERROR);
             continue;
@@ -114,7 +114,12 @@ fn DiskUsage? usage(String path) {
         percent = ((double)used / (double)total) * 100.0;
     }
 
-    return { .total = total, .used = used, .free = free, .percent = percent, };
+    return {
+        .total = total,
+        .used = used,
+        .free = free,
+        .percent = percent,
+    };
 }
 
 fn void DiskContext.init(&self, Allocator allocator) {
@@ -201,7 +206,7 @@ fn DiskIoCounters[]? io_counters(Allocator allocator, DiskContext* ctx) => @pool
 
     while (try line = io::treadline(&file)) {
         if (line.len == 0) continue;
-        String[] fields = linsys::split_whitespace(tmem, line.trim());
+        String[] fields = linsys::split_whitespace(line.trim());
         if (try disk = parse_line(allocator, fields, ctx)) {
             disks.push(disk);
         } else {
@@ -227,7 +232,7 @@ fn DiskIoCounters? io_counters_perdisk(
 
     while (try line = io::treadline(&file)) {
         if (line.len == 0) continue;
-        String[] fields = linsys::split_whitespace(tmem, line.trim());
+        String[] fields = linsys::split_whitespace(line.trim());
         if (fields.len < DISKSTATS_MIN_FIELDS) {
             linsys::push_error("diskiocounters::line", linsys::PARSE_ERROR);
             continue;
@@ -267,7 +272,7 @@ macro void? DiskIoPoller.@poll(&self; @body(dio)) => @pool() {
     self.list.clear();
     while (try line = io::treadline(&self.file)) {
         if (line.len == 0) continue;
-        String[] fields = linsys::split_whitespace(tmem, line.trim());
+        String[] fields = linsys::split_whitespace(line.trim());
         if (try disk = parse_line(tmem, fields, self.ctx)) {
             self.list.push(disk);
         } else {
@@ -285,7 +290,7 @@ macro void? DiskIoPoller.@poll_perdisk(&self, String device; @body(dio)) => @poo
     bool found = false;
     while (try line = io::treadline(&self.file)) {
         if (line.len == 0) continue;
-        String[] fields = linsys::split_whitespace(tmem, line.trim());
+        String[] fields = linsys::split_whitespace(line.trim());
         if (fields.len < DISKSTATS_MIN_FIELDS) continue;
         if (fields[2] != device) continue;
         found = true;

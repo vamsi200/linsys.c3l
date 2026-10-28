@@ -10,6 +10,11 @@ import std::os::posix;
 import std::thread;
 import std::math;
 
+struct ProcContext @private {
+    int pid;
+    int dirfd;
+}
+
 struct Process {
     int pid;
     int ppid;
@@ -134,18 +139,54 @@ struct ProcessPoller {
     CpuSnapshot last_snapshot;
 }
 
+const CInt O_RDONLY    = 0;
+const CInt O_DIRECTORY = 0x10000;
+const CInt O_CLOEXEC   = 0x80000;
+
+extern fn CInt open(ZString pathname, CInt flags) @private;
+extern fn CInt openat(CInt dirfd, ZString pathname, CInt flags) @private;
+extern fn CInt close(CInt fd) @private;
+
+fn ProcContext? open_proc_context(int pid) @private => @pool() {
+    ZString path = string::tformat("/proc/%d", pid).zstr_tcopy();
+    CInt fd      = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (fd < 0) return linsys::IO_ERROR~;
+
+    ProcContext ctx = { .pid = pid, .dirfd = fd };
+
+    return ctx;
+}
+
+fn void close_proc_context(ProcContext ctx) @private {
+    (void)close(ctx.dirfd);
+}
+
 <*
  @require pid > 0 : "pid must be positive"
 *>
 fn ProcessInfo? info(Allocator allocator, int pid) => @pool() {
+    ProcContext ctx = open_proc_context(pid)!;
+    defer close_proc_context(ctx);
+
+    CInt fd = openat(ctx.dirfd, "status", O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return linsys::IO_ERROR~;
+    CFile stream = libc::fdopen(fd, "r");
+    if (stream == null) {
+        (void)close(fd);
+        return linsys::IO_ERROR~;
+    }
+
+    defer (void)libc::fclose(stream);
+
+    char[4096] buf;
+
     ProcessInfo proc = { };
     Process p        = { };
 
-    String path = string::tformat("/proc/%d/status", pid);
-    File file   = file::open(path, "r")!;
-    defer (void)file.close();
+    String? lines = linsys::read_proc_stream(tmem, stream);
+    if (catch lines) return linsys::IO_ERROR~;
 
-    while (try line = io::treadline(&file)) {
+    foreach (line : lines.tsplit("\n")) {
         sz? idx = line.index_of_char(':');
         if (catch idx) continue;
         if (idx == -1) continue;
@@ -199,11 +240,16 @@ fn ProcessInfo? info(Allocator allocator, int pid) => @pool() {
         }
     }
 
-    linsys::@try_field(proc.exe_path, read_exe(allocator, pid), "exe", "".copy(allocator));
-    linsys::@try_field(proc.cmdline, read_cmdline(allocator, pid), "cmdline", "".copy(allocator));
+    linsys::@try_field(proc.exe_path, read_exe_helper(allocator, ctx), "exe", "".copy(allocator));
+    linsys::@try_field(
+        proc.cmdline,
+        read_cmdline_helper(allocator, ctx),
+        "cmdline",
+        "".copy(allocator)
+    );
     linsys::@try_field(
         proc.terminal,
-        terminal(allocator, pid),
+        terminal_helper(allocator, ctx),
         "terminal",
         "".copy(allocator)
     );
@@ -236,20 +282,22 @@ fn ProcState proc_state(char c) @private {
     }
 }
 
-<*
- @require pid > 0 : "pid must be positive"
-*>
-fn Process? proc(Allocator allocator, int pid) => @pool() {
-    Process p;
+fn Process? proc_helper(Allocator allocator, ProcContext ctx) @private => @pool() {
+    Process p = { };
 
-    String path = string::tformat("/proc/%d/status", pid);
-    File file   = file::open(path, "r")!;
-    defer (void)file.close();
+    CFile stream = open_proc_stream(ctx, "status")!;
+    defer (void)libc::fclose(stream);
 
-    while (try line = io::treadline(&file)) {
+    char[4096] buf;
+
+    while (true) {
+        ZString raw_line = libc::fgets(&buf, 4096, stream);
+        if (raw_line == null) break;
+
+        String line = raw_line.str_view();
+
         long? idx = line.index_of_char(':');
-        if (catch err = idx) continue;
-        if (idx == -1) continue;
+        if (catch idx) continue;
 
         String key  = line[:idx].trim();
         String data = line[idx + 1..].trim();
@@ -265,36 +313,87 @@ fn Process? proc(Allocator allocator, int pid) => @pool() {
                 p.name = data.copy(allocator);
 
             case "State":
-                p.state = proc_state((char)data[0]);
+                if (data.len > 0) {
+                    p.state = proc_state((char)data[0]);
+                }
 
             default:
                 continue;
         }
     }
 
+    if (libc::ferror(stream) != 0) {
+        p.free(allocator);
+        return linsys::IO_ERROR~;
+    }
+
     return p;
+}
+
+<*
+ @require pid > 0 : "pid must be positive"
+*>
+fn Process? proc(Allocator allocator, int pid) => @pool() {
+    ProcContext ctx = open_proc_context(pid)!;
+    defer close_proc_context(ctx);
+
+    return proc_helper(allocator, ctx);
 }
 
 fn void Process[].free(self, Allocator allocator) => linsys::free_slice(self, allocator);
 fn void Process.free(self, Allocator allocator) => linsys::free_fields(self, allocator);
 
+fn CFile? open_proc_stream(ProcContext ctx, ZString filename) @private {
+    CInt fd = openat(ctx.dirfd, filename, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return linsys::IO_ERROR~;
+
+    CFile stream = libc::fdopen(fd, "r");
+
+    if (stream == null) {
+        (void)close(fd);
+        return linsys::IO_ERROR~;
+    }
+
+    return stream;
+}
+
+fn String? read_cmdline_helper(Allocator allocator, ProcContext ctx) @private => @pool() {
+    CFile stream = open_proc_stream(ctx, "cmdline")!;
+    defer (void)libc::fclose(stream);
+
+    DString content;
+    content.init(tmem);
+    defer content.free();
+
+    char[4096] buf;
+
+    while (true) {
+        usz n = libc::fread(&buf, 1, 4096, stream);
+        if (n == 0) break;
+        content.append(buf[:n]);
+    }
+
+    if (libc::ferror(stream) != 0) return linsys::IO_ERROR~;
+
+    if (content.len() == 0) return "".copy(allocator);
+
+    String result = content.str_view();
+
+    for (usz i = 0; i < result.len; i++) {
+        if (result[i] == '\0') result[i] = ' ';
+    }
+
+    return result.trim_right().copy(allocator);
+}
+
 <*
  @require pid > 0 : "pid must be positive"
 *>
 fn String? read_cmdline(Allocator allocator, int pid) => @pool() {
-    String path = string::tformat("/proc/%d/cmdline", pid);
-    File file   = file::open(path, "r")!;
-    defer (void)file.close();
-    String content = linsys::read_file(tmem, file)!;
+    ProcContext ctx = open_proc_context(pid)!;
+    defer close_proc_context(ctx);
 
-    // It is common - there would be no cmdline in many cases.
-    if (content.len == 0) return "".copy(allocator);
-
-    for (usz i = 0; i < content.len; i++) {
-        if (content[i] == '\0') content[i] = ' ';
-    }
-
-    return content.trim_right().copy(allocator);
+    return read_cmdline_helper(allocator, ctx);
 }
 
 fn String? readlink_alloc(Allocator allocator, ZString path) @private {
@@ -316,12 +415,25 @@ fn String? readlink_alloc(Allocator allocator, ZString path) @private {
     return result.copy_str(allocator);
 }
 
+extern fn sz readlinkat(CInt dirfd, ZString pathname, char* buf, usz bufsiz);
+
+fn String? read_exe_helper(Allocator allocator, ProcContext ctx) @private {
+    char[4096] buf;
+
+    sz n = readlinkat(ctx.dirfd, "exe", &buf, 4096);
+    if (n < 0) return linsys::IO_ERROR~;
+
+    return ((String)buf[:(usz)n]).copy(allocator);
+}
+
 <*
  @require pid > 0 : "pid must be positive"
 *>
 fn String? read_exe(Allocator allocator, int pid) {
-    String path = string::tformat("/proc/%d/exe", pid);
-    return readlink_alloc(allocator, path.zstr_tcopy());
+    ProcContext ctx = open_proc_context(pid)!;
+    defer close_proc_context(ctx);
+
+    return read_exe_helper(allocator, ctx);
 }
 
 fn int[]? list_pids(Allocator allocator) => @pool() {
@@ -371,7 +483,7 @@ fn EnvVar[]? environ(Allocator allocator, int pid) => @pool() {
     String path = string::tformat("/proc/%d/environ", pid);
     File file   = file::open(path, "r")!;
     defer (void)file.close();
-    String content = linsys::read_file(tmem, file)!;
+    String content = linsys::read_file(file)!;
     String[] s     = content.split(tmem, "\0");
     List{EnvVar} ev;
     ev.init(allocator);
@@ -401,7 +513,7 @@ fn String? environ_get(Allocator allocator, int pid, String key) {
         File file   = file::open(path, "r")!;
         defer (void)file.close();
 
-        String content = linsys::read_file(tmem, file)!;
+        String content = linsys::read_file(file)!;
 
         foreach (line : content.split(tmem, "\0")) {
             long? idx = line.index_of_char('=');
@@ -466,7 +578,7 @@ fn MemoryMap[]? maps(Allocator allocator, int pid) => @pool() {
 
     while (try line = io::treadline(&file)) {
         if (line.len == 0) continue;
-        String[] split = linsys::split_whitespace(tmem, line);
+        String[] split = linsys::split_whitespace(line);
 
         if (split.len < 5) {
             linsys::push_error("memorymap::maps", linsys::PARSE_ERROR);
@@ -616,14 +728,14 @@ fn void? read_connections(
 
     File file = file::open(path, "r")!;
     defer (void)file.close();
-    String content = linsys::read_file(tmem, file)!;
+    String content = linsys::read_file(file)!;
     bool is_v6     = proto == Protocol.TCP6 || proto == Protocol.UDP6;
     ushort lp      = 0;
     ushort rp      = 0;
 
     foreach (i, line : content.split(tmem, "\n")) {
         if (i == 0 || line.len == 0) continue;
-        String[] raw = linsys::split_whitespace(tmem, line.trim());
+        String[] raw = linsys::split_whitespace(line.trim());
 
         usz n = 0;
         foreach (f : raw) {
@@ -707,20 +819,21 @@ fn double? create_time(int pid) => @pool() {
     File file = file::open(p, "r")!;
     defer (void)file.close();
 
-    String raw      = linsys::read_file(tmem, file)!;
-    sz rp           = raw.rindex_of(")")!;
-    String after    = raw[(rp + 2)..];
+    String raw      = linsys::read_file(file)!;
     String[] fields = parse_proc_stat_fields(tmem, raw)!;
 
     if (fields.len < 20) return linsys::PARSE_ERROR~;
-    double start_time;
-    if (try ulong val = fields[19].to_ulong()) {
-        ulong btime = system::boot_time();
-        ulong clk   = system::clktck();
-        start_time = (double)btime + ((double)val / (double)clk);
-    }
 
-    return start_time;
+    ulong? val = fields[19].to_ulong();
+
+    if (catch val) return linsys::PARSE_ERROR~;
+
+    ulong btime = system::boot_time();
+    ulong clk   = system::clktck();
+
+    if (clk == 0) return linsys::PARSE_ERROR~;
+
+    return (double)btime + ((double)val / (double)clk);
 }
 
 fn String[]? parse_proc_stat_fields(Allocator allocator, String raw) @private => @pool() {
@@ -728,7 +841,7 @@ fn String[]? parse_proc_stat_fields(Allocator allocator, String raw) @private =>
 
     String after = raw[(rp + 2)..];
 
-    String[] raw_fields = linsys::split_whitespace(tmem, after);
+    String[] raw_fields = linsys::split_whitespace(after);
 
     List{String} fields;
     fields.init(allocator);
@@ -747,7 +860,7 @@ fn CpuTimes? cpu_times_parse(String path) @private => @pool() {
     CpuTimes cpu = { };
     File file    = file::open(path, "r")!;
     defer (void)file.close();
-    String raw      = linsys::read_file(tmem, file)!;
+    String raw      = linsys::read_file(file)!;
     String[] fields = parse_proc_stat_fields(tmem, raw)!;
 
     if (fields.len > 14) {
@@ -965,7 +1078,7 @@ fn int[]? children(Allocator allocator, int pid, bool recursive = false) => @poo
         String stat     = (String)buf[:n];
         sz end_comm     = stat.rindex_of(")")!;
         String after    = stat[end_comm + 2..];
-        String[] fields = linsys::split_whitespace(tmem, after);
+        String[] fields = linsys::split_whitespace(after);
 
         if (fields.len < 2) {
             linsys::push_error("children::fields", linsys::PARSE_ERROR);
@@ -1107,7 +1220,7 @@ fn RLimitEntry[]? rlimits_get(Allocator allocator, int pid) => @pool() {
     int i = 0;
     while (try line = io::treadline(&file)) {
         if (i++ == 0 || line.len == 0) continue;
-        String[] parts = linsys::split_whitespace(tmem, line.trim());
+        String[] parts = linsys::split_whitespace(line.trim());
         int pc         = 0;
         String[4] filtered;
 
@@ -1233,11 +1346,18 @@ extern fn Passwd* getpwuid(uint uid);
 <*
  @require pid > 0 : "pid must be positive"
 *>
-fn String? username(Allocator allocator, int pid) => @pool(){
+fn String? username(Allocator allocator, int pid) => @pool() {
     if (!exists(pid)) return linsys::NO_SUCH_PROCESS~;
     ProcessInfo? p = info(tmem, pid);
     if (catch p) return linsys::UNKNOWN~;
-    return ((ZString)getpwuid((uint)p.uid).pw_name).copy(allocator);
+
+    Passwd* pw = getpwuid((uint)p.uid);
+
+    if (pw == null) {
+        return linsys::USER_NOT_FOUND~;
+    }
+
+    return ((ZString)pw.pw_name).copy(allocator);
 }
 
 struct Timespec {
@@ -1265,43 +1385,61 @@ struct Stat {
 
 extern fn int stat(ZString path, Stat* statbuf) @private;
 
-<*
- @require pid > 0 : "pid must be positive"
-*>
-fn String? terminal(Allocator allocator, int pid) => @pool() {
-    if (!exists(pid)) return linsys::NO_SUCH_PROCESS~;
+fn String? terminal_helper(Allocator allocator, ProcContext ctx) @private => @pool() {
+    CFile stream = open_proc_stream(ctx, "stat")!;
+    defer (void)libc::fclose(stream);
 
-    String path = string::tformat("/proc/%d/stat", pid);
-    File? file  = file::open(path, "r");
+    char[4096] buf;
+    ZString raw = libc::fgets(&buf, 4096, stream);
 
-    if (catch file) return linsys::IO_ERROR~;
-    defer (void)file.close();
+    if (raw == null) return linsys::IO_ERROR~;
 
-    String? content = linsys::read_file(tmem, file);
-    if (catch content) return linsys::IO_ERROR~;
-
+    String content  = raw.str_view();
     String[] fields = parse_proc_stat_fields(tmem, content)!;
-    int tty_nr      = fields[4].to_int()!;
+
+    if (fields.len <= 4) return linsys::PARSE_ERROR~;
+
+    int tty_nr = fields[4].to_int()!;
 
     if (tty_nr == 0) return linsys::NO_TERMINAL~;
 
     Stat stat;
+
     PathList list = io::path::ls(tmem, (Path)"/dev/pts/")!;
 
     foreach (l : list) {
         String device = string::tformat("/dev/pts/%s", l);
-        if (process::stat((ZString)device, &stat) != 0) continue;
-        if (stat.st_rdev == (ulong)tty_nr) return device.copy(allocator);
+
+        if (process::stat(device.zstr_tcopy(), &stat) != 0) continue;
+
+        if (stat.st_rdev == (ulong)tty_nr) {
+            return device.copy(allocator);
+        }
     }
 
     foreach (l : io::path::ls(tmem, (Path)"/dev/")!) {
         if (!l.contains("tty")) continue;
+
         String device = string::tformat("/dev/%s", l);
-        if (process::stat((ZString)device, &stat) != 0) continue;
-        if (stat.st_rdev == (ulong)tty_nr) return device.copy(allocator);
+
+        if (process::stat(device.zstr_tcopy(), &stat) != 0) continue;
+
+        if (stat.st_rdev == (ulong)tty_nr) {
+            return device.copy(allocator);
+        }
     }
 
     return linsys::TERMINAL_NOT_FOUND~;
+}
+
+<*
+ @require pid > 0 : "pid must be positive"
+*>
+fn String? terminal(Allocator allocator, int pid) => @pool() {
+    ProcContext ctx = open_proc_context(pid)!;
+    defer close_proc_context(ctx);
+
+    return terminal_helper(allocator, ctx);
 }
 
 struct MemoryFullInfo {
@@ -1330,7 +1468,7 @@ fn String? read_vms_file(Allocator allocator, int pid) @private => @pool() {
     defer (void)file.close();
     if (catch file) return linsys::IO_ERROR~;
 
-    return linsys::read_file(allocator, file).copy(allocator).trim();
+    return linsys::read_file(file).copy(allocator).trim();
 }
 
 fn MemoryFullInfo? read_statm(MemoryFullInfo* mfi, int pid) @private => @pool() {
@@ -1469,7 +1607,7 @@ fn PageFault? page_fault(int pid) => @pool() {
     if (catch file) return linsys::IO_ERROR~;
     defer (void)file.close();
 
-    String? content = linsys::read_file(tmem, file);
+    String? content = linsys::read_file(file);
     if (catch content) return linsys::IO_ERROR~;
 
     String[] fields = parse_proc_stat_fields(tmem, content)!;
@@ -1656,11 +1794,11 @@ struct SchedulingInfo {
 }
 
 constdef SchedulingPolicy : CInt {
-    OTHER = 0,
-    FIFO = 1,
-    RR = 2,
-    BATCH = 3,
-    IDLE = 5,
+    OTHER    = 0,
+    FIFO     = 1,
+    RR       = 2,
+    BATCH    = 3,
+    IDLE     = 5,
     DEADLINE = 6,
 }
 
@@ -1753,17 +1891,12 @@ fn SchedStat? sched_stat(int pid) => @pool() {
     String? line = io::treadline(&file);
     if (catch line) return linsys::IO_ERROR~;
 
-    String[] fields = linsys::split_whitespace(tmem, line);
+    String[] fields = linsys::split_whitespace(line);
 
     if (fields.len < 3) return linsys::IO_ERROR~;
 
     SchedStat result;
-    linsys::@try_field(
-        result.run_time_ns,
-        fields[0].to_ulong(),
-        "sched_stat::run_time_ns",
-        0
-    );
+    linsys::@try_field(result.run_time_ns, fields[0].to_ulong(), "sched_stat::run_time_ns", 0);
 
     linsys::@try_field(
         result.runqueue_wait_ns,

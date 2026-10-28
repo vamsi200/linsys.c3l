@@ -86,7 +86,7 @@ fn NetIoCounters? parse_net_io_line(Allocator allocator, String line) @private =
 
     String iface = line[:idx].trim();
 
-    String[] fields = linsys::split_whitespace(tmem, line[idx + 1..].trim());
+    String[] fields = linsys::split_whitespace(line[idx + 1..].trim());
 
     ulong bytes_recv, packets_recv, errin, dropin;
     ulong bytes_sent, packets_sent, errout, dropout;
@@ -227,7 +227,7 @@ fn void? read_system_connections(
 
     while (try line = io::treadline(file)) {
         if (i++ == 0 || line.len == 0) continue;
-        String[] fields = linsys::split_whitespace(tmem, line.trim());
+        String[] fields = linsys::split_whitespace(line.trim());
         if (fields.len < 4) continue;
 
         sz? colon_l = fields[1].index_of_char(':');
@@ -257,11 +257,13 @@ fn void? read_system_connections(
                 .local_addr = is_v6 ? linsys::ip_to_string_v6(
                     allocator,
                     linsys::parse_addr6(local_addr)
-                ) : linsys::ip_to_string(allocator, linsys::parse_addr(local_addr)),
+                )
+                    : linsys::ip_to_string(allocator, linsys::parse_addr(local_addr)),
                 .remote_addr = is_v6 ? linsys::ip_to_string_v6(
                     allocator,
                     linsys::parse_addr6(remote_addr)
-                ) : linsys::ip_to_string(allocator, linsys::parse_addr(remote_addr)),
+                )
+                    : linsys::ip_to_string(allocator, linsys::parse_addr(remote_addr)),
                 .local_port = lport,
                 .remote_port = rport,
                 .state = linsys::tcp_state(fields[3]),
@@ -360,7 +362,9 @@ fn NetIfStats[]? interface_stats(Allocator allocator) => @pool() {
         String? iface = entry.file_tbasename();
         if (catch iface) continue;
 
-        NetIfStats st = { .name = iface.copy(allocator), };
+        NetIfStats st = {
+            .name = iface.copy(allocator),
+        };
 
         String base = string::tformat("/sys/class/net/%s", iface);
 
@@ -368,7 +372,7 @@ fn NetIfStats[]? interface_stats(Allocator allocator) => @pool() {
 
         if (try File f = file::open(oper, "r")) {
             defer (void)f.close();
-            String state = linsys::read_file(tmem, f)!.trim();
+            String state = linsys::read_file(f)!.trim();
             st.is_up = state == "up";
         }
 
@@ -376,21 +380,21 @@ fn NetIfStats[]? interface_stats(Allocator allocator) => @pool() {
 
         if (try File f = file::open(mtu, "r")) {
             defer (void)f.close();
-            st.mtu = (linsys::read_file(tmem, f) ?? "0").trim().to_int() ?? 0;
+            st.mtu = (linsys::read_file(f) ?? "0").trim().to_int() ?? 0;
         }
 
         String speed = string::tformat("%s/speed", base);
 
         if (try File f = file::open(speed, "r")) {
             defer (void)f.close();
-            st.speed = (linsys::read_file(tmem, f) ?? "0").trim().to_int() ?? 0;
+            st.speed = (linsys::read_file(f) ?? "0").trim().to_int() ?? 0;
         }
 
         String flags = string::tformat("%s/flags", base);
 
         if (try File f = file::open(flags, "r")) {
             defer (void)f.close();
-            String raw = (linsys::read_file(tmem, f) ?? "0").trim();
+            String raw = (linsys::read_file(f) ?? "0").trim();
             String hex = raw.starts_with("0x") ? raw[2..] : raw;
             st.flags = hex.to_ulong(16) ?? 0;
         }

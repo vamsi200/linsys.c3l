@@ -93,7 +93,7 @@ fn PressureInfo? parse_psi(String content, String ctx) @private {
     foreach (line : lines) {
         if (line.len == 0) continue;
 
-        String[] fields = linsys::split_whitespace(tmem, line);
+        String[] fields = linsys::split_whitespace(line);
         if (fields.len == 0) continue;
 
         PressureMetrics* metrics;
@@ -130,21 +130,21 @@ fn PressureInfo? parse_psi(String content, String ctx) @private {
 fn PressureInfo? psi_cpu() => @pool() {
     File file = file::open("/proc/pressure/cpu", "r")!;
     defer (void)file.close();
-    String content = linsys::read_file(tmem, file)!;
+    String content = linsys::read_file(file)!;
     return parse_psi(content, "psi_cpu");
 }
 
 fn PressureInfo? psi_memory() => @pool() {
     File file = file::open("/proc/pressure/memory", "r")!;
     defer (void)file.close();
-    String content = linsys::read_file(tmem, file)!;
+    String content = linsys::read_file(file)!;
     return parse_psi(content, "psi_memory");
 }
 
 fn PressureInfo? psi_io() => @pool() {
     File file = file::open("/proc/pressure/io", "r")!;
     defer (void)file.close();
-    String content = linsys::read_file(tmem, file)!;
+    String content = linsys::read_file(file)!;
     return parse_psi(content, "psi_io");
 }
 
@@ -152,7 +152,7 @@ fn SystemCpuTimes? cpu_times() => @pool() {
     File file = file::open("/proc/stat", "r")!;
     defer (void)file.close();
     String line  = io::treadline(&file)!;
-    String[] raw = linsys::split_whitespace(tmem, line);
+    String[] raw = linsys::split_whitespace(line);
 
     ulong user, nice, system, idle, iowait, irq, softirq, steal, guest, guest_nice;
 
@@ -300,7 +300,7 @@ fn SystemCpuSnapshot? cpu_snapshot() => @pool() {
     String line = io::treadline(&file)!;
 
     if (line.starts_with("cpu ")) {
-        String[] fields = linsys::split_whitespace(tmem, line);
+        String[] fields = linsys::split_whitespace(line);
         ulong total     = 0;
         ulong idle      = 0;
 
@@ -336,7 +336,7 @@ fn SystemCpuSnapshot[]? cpu_snapshot_percpu(Allocator allocator) => @pool() {
         if (!line.starts_with("cpu")) continue;
         if (line.starts_with("cpu ")) continue;
 
-        String[] fields = linsys::split_whitespace(tmem, line);
+        String[] fields = linsys::split_whitespace(line);
 
         foreach (field : fields[1..]) {
             total += field.to_ulong() ?? 0;
@@ -460,11 +460,11 @@ fn CpuFreq? cpu_freq() => @pool() {
     File max = file::open(max_path, "r")!;
     defer (void)max.close();
 
-    cf.current = ((double)(linsys::read_file(tmem, cur)!.trim().to_ulong() ?? 0) / 1000.0);
+    cf.current = ((double)(linsys::read_file(cur)!.trim().to_ulong() ?? 0) / 1000.0);
 
-    cf.min = ((double)(linsys::read_file(tmem, min)!.trim().to_ulong() ?? 0) / 1000.0);
+    cf.min = ((double)(linsys::read_file(min)!.trim().to_ulong() ?? 0) / 1000.0);
 
-    cf.max = ((double)(linsys::read_file(tmem, max)!.trim().to_ulong() ?? 0) / 1000.0);
+    cf.max = ((double)(linsys::read_file(max)!.trim().to_ulong() ?? 0) / 1000.0);
 
     return cf;
 }
@@ -506,16 +506,16 @@ fn CpuFreq[]? cpu_freq_percpu(Allocator allocator) => @pool() {
             if (catch max) continue;
             defer (void)max.close();
 
-            String cur_content = linsys::read_file(tmem, cur) ?? "".copy(allocator);
-            String min_content = linsys::read_file(tmem, min) ?? "".copy(allocator);
-            String max_content = linsys::read_file(tmem, max) ?? "".copy(allocator);
+            String cur_content = linsys::read_file(cur) ?? "".copy(allocator);
+            String min_content = linsys::read_file(min) ?? "".copy(allocator);
+            String max_content = linsys::read_file(max) ?? "".copy(allocator);
 
             ulong cur_val, min_val, max_val;
-            linsys::@try_field(cur_val, (linsys::read_file(tmem, cur) ?? "").trim()
+            linsys::@try_field(cur_val, (linsys::read_file(cur) ?? "").trim()
                 .to_ulong(), "cpufreq::current", 0);
-            linsys::@try_field(min_val, (linsys::read_file(tmem, min) ?? "").trim()
+            linsys::@try_field(min_val, (linsys::read_file(min) ?? "").trim()
                 .to_ulong(), "cpufreq::min", 0);
-            linsys::@try_field(max_val, (linsys::read_file(tmem, max) ?? "").trim()
+            linsys::@try_field(max_val, (linsys::read_file(max) ?? "").trim()
                 .to_ulong(), "cpufreq::max", 0);
 
             freqs.push(
@@ -533,7 +533,7 @@ fn CpuStats? cpu_stats() => @pool() {
     CpuStats stats = { };
 
     while (try line = io::treadline(&file)) {
-        String[] fields = linsys::split_whitespace(tmem, line);
+        String[] fields = linsys::split_whitespace(line);
 
         if (fields.len < 2) {
             linsys::push_error("cpustats::line", linsys::PARSE_ERROR);
@@ -576,7 +576,7 @@ fn LoadAvg? load_avg() => @pool() {
     defer (void)file.close();
 
     while (try line = io::treadline(&file)) {
-        String[] fields = linsys::split_whitespace(tmem, line);
+        String[] fields = linsys::split_whitespace(line);
 
         if (fields.len < 3) {
             return linsys::PARSE_ERROR~;
@@ -670,9 +670,9 @@ fn CpuTemp[]? cpu_temps(Allocator allocator) => @pool() {
         if (catch ty) continue;
         defer (void)ty.close();
 
-        double current = ((double)(linsys::read_file(tmem, tf)!.trim().to_long() ?? 0) / 1000.0);
+        double current = ((double)(linsys::read_file(tf)!.trim().to_long() ?? 0) / 1000.0);
 
-        String sensor = linsys::read_file(tmem, ty)!.trim().copy(allocator);
+        String sensor = linsys::read_file(ty)!.trim().copy(allocator);
 
         temps.push(
             {
@@ -716,8 +716,8 @@ fn double? uptime() {
     @pool() {
         File file = file::open("/proc/uptime", "r")!;
         defer (void)file.close();
-        String content  = linsys::read_file(tmem, file)!;
-        String[] fields = linsys::split_whitespace(tmem, content.trim());
+        String content  = linsys::read_file(file)!;
+        String[] fields = linsys::split_whitespace(content.trim());
         if (fields.len < 1) return linsys::NOT_FOUND~;
         return fields[0].to_double();
     };
@@ -726,13 +726,13 @@ fn double? uptime() {
 fn String? hostname(Allocator allocator) {
     File file = file::open("/proc/sys/kernel/hostname", "r")!;
     defer (void)file.close();
-    return linsys::read_file(tmem, file)!.trim().copy(allocator);
+    return linsys::read_file(file)!.trim().copy(allocator);
 }
 
 fn String? kernel_version(Allocator allocator) {
     File file = file::open("/proc/sys/kernel/osrelease", "r")!;
     defer (void)file.close();
-    return linsys::read_file(tmem, file)!.trim().copy(allocator);
+    return linsys::read_file(file)!.trim().copy(allocator);
 }
 
 fn String? os_release(Allocator allocator) {
@@ -894,8 +894,7 @@ fn void? cgroup_walk(Allocator allocator, String path, List{Cgroup}* result) @pr
 
         if (!path::is_dir((Path)child)) continue;
 
-        String controllers_path =
-            string::tformat("%s/cgroup.controllers", child);
+        String controllers_path = string::tformat("%s/cgroup.controllers", child);
 
         List{String} controllers;
         controllers.init(allocator);
@@ -906,7 +905,7 @@ fn void? cgroup_walk(Allocator allocator, String path, List{Cgroup}* result) @pr
 
         if (try f = file) {
             if (try line = io::treadline(&f)) {
-                String[] fields = linsys::split_whitespace(tmem, line);
+                String[] fields = linsys::split_whitespace(line);
 
                 foreach (field : fields) {
                     controllers.push(field.copy(allocator));
@@ -952,6 +951,6 @@ fn Cgroup[]? cgroups(Allocator allocator) => @pool() {
     return result.to_array(allocator);
 }
 
-fn CgroupInfo? cgroup_info(Allocator allocator) => @pool() {
+fn CgroupInfo? cgroup_info(Allocator allocator) @private => @pool() {
     abort("");
 }
