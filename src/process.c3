@@ -139,7 +139,7 @@ struct ProcessPoller {
     CpuSnapshot last_snapshot;
 }
 
-const CInt O_RDONLY    = 0;
+const CInt O_RDONLY    = 0x0000;
 const CInt O_DIRECTORY = 0x10000;
 const CInt O_CLOEXEC   = 0x80000;
 
@@ -150,7 +150,9 @@ extern fn CInt close(CInt fd) @private;
 fn ProcContext? open_proc_context(int pid) @private => @pool() {
     ZString path = string::tformat("/proc/%d", pid).zstr_tcopy();
     CInt fd      = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    if (fd < 0) return linsys::IO_ERROR~;
+    if (fd < 0) {
+        return linsys::errno_to_fault()~;
+    }
 
     ProcContext ctx = { .pid = pid, .dirfd = fd };
 
@@ -168,14 +170,7 @@ fn ProcessInfo? info(Allocator allocator, int pid) => @pool() {
     ProcContext ctx = open_proc_context(pid)!;
     defer close_proc_context(ctx);
 
-    CInt fd = openat(ctx.dirfd, "status", O_RDONLY | O_CLOEXEC);
-    if (fd < 0) return linsys::IO_ERROR~;
-    CFile stream = libc::fdopen(fd, "r");
-    if (stream == null) {
-        (void)close(fd);
-        return linsys::IO_ERROR~;
-    }
-
+    CFile? stream = open_proc_stream(ctx, "status");
     defer (void)libc::fclose(stream);
 
     char[4096] buf;
@@ -345,13 +340,15 @@ fn void Process.free(self, Allocator allocator) => linsys::free_fields(self, all
 
 fn CFile? open_proc_stream(ProcContext ctx, ZString filename) @private {
     CInt fd = openat(ctx.dirfd, filename, O_RDONLY | O_CLOEXEC);
-    if (fd < 0) return linsys::IO_ERROR~;
+    if (fd < 0) {
+        return linsys::errno_to_fault()~;
+    }
 
     CFile stream = libc::fdopen(fd, "r");
 
     if (stream == null) {
         (void)close(fd);
-        return linsys::IO_ERROR~;
+        return linsys::errno_to_fault()~;
     }
 
     return stream;
@@ -476,27 +473,33 @@ fn String? cwd(Allocator allocator, int pid) {
     return result;
 }
 
+fn String? read_environ_helper(Allocator allocator, ProcContext ctx) @private {
+    CFile stream = open_proc_stream(ctx, "environ")!;
+    defer (void)libc::fclose(stream);
+
+    return linsys::read_proc_stream(allocator, stream);
+}
+
 <*
  @require pid > 0 : "pid must be positive"
 *>
 fn EnvVar[]? environ(Allocator allocator, int pid) => @pool() {
-    String path = string::tformat("/proc/%d/environ", pid);
-    File file   = file::open(path, "r")!;
-    defer (void)file.close();
-    String content = linsys::read_file(file)!;
-    String[] s     = content.split(tmem, "\0");
+    ProcContext ctx = open_proc_context(pid)!;
+    defer close_proc_context(ctx);
+
+    String content = read_environ_helper(tmem, ctx)!;
+
     List{EnvVar} ev;
     ev.init(allocator);
+    defer ev.free();
 
-    foreach (line : s) {
+    foreach (line : content.split(tmem, "\0")) {
         long? idx = line.index_of_char('=');
         if (catch idx) continue;
-        if (idx == -1) continue;
-        ev.push({ .key = line[:idx].trim()
-            .copy(allocator), .value = line[idx + 1..].trim().copy(allocator) });
+
+        ev.push({ .key = line[:idx].copy(allocator), .value = line[idx + 1..].copy(allocator) });
     }
 
-    defer ev.free();
     return ev.to_array(allocator);
 }
 
@@ -507,22 +510,21 @@ fn void EnvVar.free(self, Allocator allocator) => linsys::free_fields(self, allo
  @require pid > 0 : "pid must be positive"
  @require key.len > 0 : "key must not be empty"
 *>
-fn String? environ_get(Allocator allocator, int pid, String key) {
-    @pool() {
-        String path = string::tformat("/proc/%d/environ", pid);
-        File file   = file::open(path, "r")!;
-        defer (void)file.close();
+fn String? environ_get(Allocator allocator, int pid, String key) => @pool() {
+    ProcContext ctx = open_proc_context(pid)!;
+    defer close_proc_context(ctx);
 
-        String content = linsys::read_file(file)!;
+    String content = read_environ_helper(tmem, ctx)!;
 
-        foreach (line : content.split(tmem, "\0")) {
-            long? idx = line.index_of_char('=');
-            if (catch idx) continue;
-            if (line[:idx].trim() == key) {
-                return line[idx + 1..].trim().copy(allocator);
-            }
+    foreach (line : content.split(tmem, "\0")) {
+        long? idx = line.index_of_char('=');
+        if (catch idx) continue;
+
+        if (line[:idx] == key) {
+            return line[idx + 1..].copy(allocator);
         }
-    };
+    }
+
     return linsys::NOT_FOUND~;
 }
 
@@ -548,36 +550,65 @@ fn String[]? fd_paths(Allocator allocator, int pid) => @pool() {
     return fds.to_array(allocator);
 }
 
-<*
- @require pid > 0 : "pid must be positive"
-*>
-fn int[]? fds(Allocator allocator, int pid) => @pool() {
+extern fn void* fdopendir(CInt fd) @private;
+
+fn int[]? fds_helper(Allocator allocator, ProcContext ctx) @private => @pool() {
+    CInt fd = openat(ctx.dirfd, "fd", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (fd < 0) {
+        return linsys::errno_to_fault()~;
+    }
+
+    void* dir = fdopendir(fd);
+    if (dir == null) {
+        (void)close(fd);
+        return linsys::IO_ERROR~;
+    }
+    defer (void)posix::closedir((DIRPtr)dir);
+
     List{int} fds;
     fds.init(allocator);
-
-    String proc_fd = string::tformat("/proc/%d/fd", pid);
-    Path path      = path::new(tmem, proc_fd)!;
-    PathList list  = io::path::ls(tmem, path)!;
-    foreach (fd : list) {
-        if (try int ifd = fd.file_tbasename().to_int()) fds.push(ifd);
-    }
     defer fds.free();
+
+    while (posix::Posix_dirent* entry = posix::readdir((DIRPtr)dir)) {
+        String name = ((ZString)&entry.name).str_view();
+
+        if (try int ifd = name.to_int()) {
+            fds.push(ifd);
+        }
+    }
+
     return fds.to_array(allocator);
 }
 
 <*
  @require pid > 0 : "pid must be positive"
 *>
+fn int[]? fds(Allocator allocator, int pid) => @pool() {
+    ProcContext ctx = open_proc_context(pid)!;
+    defer close_proc_context(ctx);
+
+    return fds_helper(allocator, ctx);
+}
+
+<*
+ @require pid > 0 : "pid must be positive"
+*>
 fn MemoryMap[]? maps(Allocator allocator, int pid) => @pool() {
+    ProcContext ctx = open_proc_context(pid)!;
+    defer close_proc_context(ctx);
+
+    CFile stream = open_proc_stream(ctx, "maps")!;
+    defer (void)libc::fclose(stream);
+
+    String content = linsys::read_proc_stream(tmem, stream)!;
+
     List{MemoryMap} mm;
     mm.init(allocator);
+    defer mm.free();
 
-    String p  = string::tformat("/proc/%d/maps", pid);
-    File file = file::open(p, "r")!;
-    defer (void)file.close();
-
-    while (try line = io::treadline(&file)) {
+    foreach (line : content.split(tmem, "\n")) {
         if (line.len == 0) continue;
+
         String[] split = linsys::split_whitespace(line);
 
         if (split.len < 5) {
@@ -585,7 +616,8 @@ fn MemoryMap[]? maps(Allocator allocator, int pid) => @pool() {
             continue;
         }
 
-        MemoryMap entry;
+        MemoryMap entry = { };
+
         entry.address_range = split[0].copy(allocator);
         mem::copy(&entry.perms, split[1].ptr, math::min(split[1].len, entry.perms.len));
         mem::copy(&entry.device, split[3].ptr, math::min(split[3].len, entry.device.len));
@@ -593,11 +625,13 @@ fn MemoryMap[]? maps(Allocator allocator, int pid) => @pool() {
         linsys::@try_field(entry.offset, split[2].to_long(), "memorymap::offset", 0);
         linsys::@try_field(entry.inode, split[4].to_long(), "memorymap::inode", 0);
 
-        if (split.len > 5) entry.pathname = string::tjoin(split[5..], " ").trim().copy(allocator);
+        if (split.len > 5) {
+            entry.pathname = string::tjoin(split[5..], " ").trim().copy(allocator);
+        }
+
         mm.push(entry);
     }
 
-    defer mm.free();
     return mm.to_array(allocator);
 }
 
@@ -644,43 +678,79 @@ fn String flags_to_mode(int flags, Allocator allocator) @private => @pool() {
     return result.copy_str(allocator);
 }
 
+fn String? readlinkat_alloc(Allocator allocator, CInt dirfd, ZString path) @private {
+    sz capacity = 256;
+
+    while (true) {
+        char* buf = mem::alloc::malloc(allocator, capacity);
+
+        sz n = readlinkat(dirfd, path, buf, (ulong)capacity);
+
+        if (n < 0) {
+            fault err = linsys::errno_to_fault();
+            mem::alloc::free(allocator, buf);
+            return err~;
+        }
+
+        if ((usz)n < (ulong)capacity) {
+            String result = (String)buf[0..(usz)n];
+            return result;
+        }
+
+        mem::alloc::free(allocator, buf);
+
+        if (capacity > 1024 * 1024) {
+            return linsys::IO_ERROR~;
+        }
+
+        capacity *= 2;
+    }
+}
+
 <*
  @require pid > 0 : "pid must be positive"
 *>
 fn OpenFile[]? open_files(Allocator allocator, int pid) => @pool() {
+    ProcContext ctx = open_proc_context(pid)!;
+    defer close_proc_context(ctx);
+
     List{OpenFile} of;
     of.init(allocator);
+    defer of.free();
 
-    int[] fd_list = fds(tmem, pid)!;
+    int[] fd_list = fds_helper(tmem, ctx)!;
 
     foreach (fd : fd_list) {
-        String fd_path = string::tformat("/proc/%d/fd/%d", pid, fd);
+        String fd_name = string::tformat("fd/%d", fd);
 
-        if (!os::native_file_or_dir_exists(fd_path)) {
-            linsys::push_error(fd_path, linsys::PATH_NOT_FOUND);
+        String? target = readlinkat_alloc(allocator, ctx.dirfd, fd_name.zstr_tcopy());
+
+        if (catch target) {
+            linsys::push_error("openfile::fd_link", linsys::IO_ERROR);
             continue;
         }
 
-        if (try String target = readlink_alloc(allocator, fd_path.zstr_tcopy())) {
-            if (!target.starts_with("/") || target.ends_with(" (deleted)")) {
-                mem::alloc::free(allocator, target);
-                continue;
-            }
+        if (!target.starts_with("/") || target.ends_with(" (deleted)")) {
+            mem::alloc::free(allocator, target);
+            continue;
+        }
 
-            if (!os::native_file_or_dir_exists(target)) {
-                linsys::push_error(target, linsys::PATH_NOT_FOUND);
-                mem::alloc::free(allocator, target);
-                continue;
-            }
+        OpenFile entry   = { .fd = fd, .path = target };
+        String info_name = string::tformat("fdinfo/%d", fd);
+        CFile stream     = open_proc_stream(ctx, info_name.zstr_tcopy())!;
 
-            OpenFile entry   = { .fd = fd, .path = target };
-            String info_path = string::tformat("/proc/%d/fdinfo/%d", pid, fd);
-            File file        = file::open(info_path, "r")!;
-            defer (void)file.close();
 
-            while (try line = io::treadline(&file)) {
+
+        {
+            defer (void)libc::fclose(stream);
+
+            String content = linsys::read_proc_stream(tmem, stream)!;
+
+            foreach (line : content.split(tmem, "\n")) {
                 line = line.trim();
+
                 if (!line.starts_with("flags:")) continue;
+
                 String flags_str = line["flags:".len..].trim();
 
                 if (try int flags = flags_str.to_int(8)) {
@@ -689,14 +759,11 @@ fn OpenFile[]? open_files(Allocator allocator, int pid) => @pool() {
 
                 break;
             }
-
-            of.push(entry);
-        } else {
-            linsys::push_error("openfile::fd_link", linsys::PARSE_ERROR);
         }
+
+        of.push(entry);
     }
 
-    defer of.free();
     return of.to_array(allocator);
 }
 
@@ -706,29 +773,23 @@ fn void OpenFile.free(self, Allocator allocator) => linsys::free_fields(self, al
 
 fn void? read_connections(
     Allocator allocator,
-    int pid,
+    ProcContext ctx,
     Protocol proto,
     List{Connection}* out
 ) @private => @pool() {
     String filename;
 
     switch (proto) {
-        case TCP: filename = "tcp";
-        case UDP: filename = "udp";
-        case TCP6: filename = "tcp6";
-        case UDP6: filename = "udp6";
+        case TCP: filename = "net/tcp";
+        case UDP: filename = "net/udp";
+        case TCP6: filename = "net/tcp6";
+        case UDP6: filename = "net/udp6";
     }
 
-    String path = string::tformat("/proc/%d/net/%s", pid, filename);
+    CFile stream = open_proc_stream(ctx, filename.zstr_tcopy())!;
+    defer (void)libc::fclose(stream);
 
-    if (!os::native_file_or_dir_exists(path)) {
-        linsys::push_error(path, linsys::PATH_NOT_FOUND);
-        return;
-    }
-
-    File file = file::open(path, "r")!;
-    defer (void)file.close();
-    String content = linsys::read_file(file)!;
+    String content = linsys::read_proc_stream(tmem, stream)!;
     bool is_v6     = proto == Protocol.TCP6 || proto == Protocol.UDP6;
     ushort lp      = 0;
     ushort rp      = 0;
@@ -796,14 +857,17 @@ fn void? read_connections(
  @require pid > 0 : "pid must be positive"
 *>
 fn Connection[]? connections(Allocator allocator, int pid) {
+    ProcContext ctx = open_proc_context(pid)!;
+    defer close_proc_context(ctx);
+
     List{Connection} list;
     list.init(allocator);
     defer list.free();
 
-    read_connections(allocator, pid, Protocol.TCP, &list)!;
-    read_connections(allocator, pid, Protocol.UDP, &list)!;
-    read_connections(allocator, pid, Protocol.TCP6, &list)!;
-    read_connections(allocator, pid, Protocol.UDP6, &list)!;
+    read_connections(allocator, ctx, Protocol.TCP, &list)!;
+    read_connections(allocator, ctx, Protocol.UDP, &list)!;
+    read_connections(allocator, ctx, Protocol.TCP6, &list)!;
+    read_connections(allocator, ctx, Protocol.UDP6, &list)!;
 
     return list.to_array(allocator);
 }
@@ -1059,34 +1123,42 @@ struct PidEntry {
  @require pid > 0 : "pid must be positive"
 *>
 fn int[]? children(Allocator allocator, int pid, bool recursive = false) => @pool() {
-    if (!exists(pid)) return linsys::NO_SUCH_PROCESS~;
+    ProcContext target = open_proc_context(pid)!;
+    defer close_proc_context(target);
+
     int[] pid_list = list_pids(tmem)!;
 
     List{PidEntry} entries;
     entries.init(tmem);
 
-    char[4096] buf;
     foreach (p : pid_list) {
-        String path = string::tformat("/proc/%d/stat", p);
-        File? file  = file::open(path, "r");
+        @pool() {
+            ProcContext ctx = open_proc_context(p)!!;
+            defer close_proc_context(ctx);
 
-        if (catch file) continue;
-        defer (void)file.close();
-        sz? n = file.read(&buf);
+            CFile stream = open_proc_stream(ctx, "stat")!!;
+            defer (void)libc::fclose(stream);
 
-        if (catch n) continue;
-        String stat     = (String)buf[:n];
-        sz end_comm     = stat.rindex_of(")")!;
-        String after    = stat[end_comm + 2..];
-        String[] fields = linsys::split_whitespace(after);
+            String stat = linsys::read_proc_stream(tmem, stream)!!;
 
-        if (fields.len < 2) {
-            linsys::push_error("children::fields", linsys::PARSE_ERROR);
-            continue;
-        }
-        int ppid = fields[1].to_int()!;
+            sz? end_comm = stat.rindex_of(")");
+            if (catch end_comm) {
+                linsys::push_error("children::stat", linsys::PARSE_ERROR);
+                continue;
+            }
 
-        entries.push({ p, ppid });
+            String after    = stat[end_comm + 2..];
+            String[] fields = linsys::split_whitespace(after);
+
+            if (fields.len < 2) {
+                linsys::push_error("children::fields", linsys::PARSE_ERROR);
+                continue;
+            }
+
+            if (try int ppid = fields[1].to_int()) {
+                entries.push({ p, ppid });
+            }
+        };
     }
 
     List{int} result;
@@ -1099,8 +1171,10 @@ fn int[]? children(Allocator allocator, int pid, bool recursive = false) => @poo
 
     while (queue.len() > 0) {
         int current = queue.pop()!;
+
         foreach (e : entries) {
             if (e.ppid != current) continue;
+
             result.push(e.pid);
             if (recursive) queue.push(e.pid);
         }
@@ -1210,15 +1284,23 @@ fn void? cpu_affinity_set(int pid, int[] cpus) {
  @require pid > 0 : "pid must be positive"
 *>
 fn RLimitEntry[]? rlimits_get(Allocator allocator, int pid) => @pool() {
-    String path = string::tformat("/proc/%d/limits", pid);
-    File file   = file::open(path, "r")!;
-    defer (void)file.close();
+    ProcContext ctx = open_proc_context(pid)!;
+    defer close_proc_context(ctx);
+
+    ZString path  = string::tformat("/proc/%d/limits", pid).zstr_tcopy();
+    CFile? stream = open_proc_stream(ctx, path);
+    defer (void)libc::fclose(stream);
+
+    String? lines = linsys::read_proc_stream(tmem, stream);
+    if (catch lines) return linsys::IO_ERROR~;
+
     List{RLimitEntry} entries;
     entries.init(allocator);
     defer entries.free();
 
     int i = 0;
-    while (try line = io::treadline(&file)) {
+
+    foreach (line : lines.tsplit("\n")) {
         if (i++ == 0 || line.len == 0) continue;
         String[] parts = linsys::split_whitespace(line.trim());
         int pc         = 0;
@@ -1264,17 +1346,32 @@ fn void RLimitEntry.free(self, Allocator allocator) => linsys::free_fields(self,
  @require pid > 0 : "pid must be positive"
 *>
 fn ThreadInfo[]? threads(Allocator allocator, int pid) => @pool() {
-    Path path     = string::tformat("/proc/%d/task", pid).to_path(tmem)!;
-    PathList list = io::path::ls(tmem, path)!;
+    ProcContext ctx = open_proc_context(pid)!;
+    defer close_proc_context(ctx);
+
+    CInt fd = openat(ctx.dirfd, "task", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (fd < 0) return linsys::errno_to_fault()~;
+
+    void* dir = fdopendir(fd);
+    if (dir == null) {
+        fault err = linsys::errno_to_fault();
+        (void)close(fd);
+        return err~;
+    }
+    defer (void)posix::closedir((DIRPtr)dir);
 
     List{ThreadInfo} ti;
     ti.init(allocator);
     defer ti.free();
 
-    foreach (l : list) {
-        if (try int tid = l.basename().to_int()) {
+    while (posix::Posix_dirent* entry = posix::readdir((DIRPtr)dir)) {
+        String name = ((ZString)&entry.name).str_view();
+
+        if (try int tid = name.to_int()) {
+            // should you use existing context??
             CpuTimes? ct = cpu_times_threads(pid, tid);
             if (catch ct) continue;
+
             ti.push(
                 {
                     .tid = tid,
@@ -1286,10 +1383,9 @@ fn ThreadInfo[]? threads(Allocator allocator, int pid) => @pool() {
                     }
                 }
             );
-        } else {
-            linsys::push_error("threadinfo::line", linsys::PARSE_ERROR);
         }
     }
+
     return ti.to_array(allocator);
 }
 
@@ -1471,9 +1567,14 @@ fn String? read_vms_file(Allocator allocator, int pid) @private => @pool() {
     return linsys::read_file(file).copy(allocator).trim();
 }
 
-fn MemoryFullInfo? read_statm(MemoryFullInfo* mfi, int pid) @private => @pool() {
-    String statm    = read_vms_file(tmem, pid)!!;
-    String[] fields = statm.split(tmem, " ");
+fn MemoryFullInfo? read_statm(MemoryFullInfo* mfi, ProcContext ctx) @private => @pool() {
+    CFile stream = open_proc_stream(ctx, "statm")!;
+    defer (void)libc::fclose(stream);
+
+    String statm    = linsys::read_proc_stream(tmem, stream)!;
+    String[] fields = linsys::split_whitespace(statm.trim());
+
+    if (fields.len < 7) return linsys::PARSE_ERROR~;
 
     if (fields.len < 7) return linsys::IO_ERROR~;
 
@@ -1535,17 +1636,18 @@ fn MemoryFullInfo? read_statm(MemoryFullInfo* mfi, int pid) @private => @pool() 
  @require pid > 0 : "pid must be positive"
 *>
 fn MemoryFullInfo? memory_full_info(int pid) => @pool() {
-    MemoryFullInfo mfi;
+    ProcContext ctx = open_proc_context(pid)!;
+    defer close_proc_context(ctx);
 
-    read_statm(&mfi, pid)!!;
+    MemoryFullInfo mfi = { };
+    read_statm(&mfi, ctx)!;
 
-    String path = string::tformat("/proc/%d/smaps", pid);
-    File? file  = file::open(path, "r");
-    defer (void)file.close();
+    CFile stream = open_proc_stream(ctx, "smaps")!;
+    defer (void)libc::fclose(stream);
 
-    if (catch file) return linsys::IO_ERROR~;
+    String content = linsys::read_proc_stream(tmem, stream)!;
 
-    while (try line = io::treadline(&file)) {
+    foreach (line : content.tsplit("\n")) {
         sz? idx = line.index_of_char(':');
         if (catch idx) continue;
 
@@ -1599,21 +1701,18 @@ struct PageFault {
  @require pid > 0 : "pid must be positive"
 *>
 fn PageFault? page_fault(int pid) => @pool() {
-    if (!exists(pid)) return linsys::NO_SUCH_PROCESS~;
+    ProcContext ctx = open_proc_context(pid)!;
+    defer close_proc_context(ctx);
 
-    String path = string::tformat("/proc/%d/stat", pid);
-    File? file  = file::open(path, "r");
+    CFile stream = open_proc_stream(ctx, "stat")!;
+    defer (void)libc::fclose(stream);
 
-    if (catch file) return linsys::IO_ERROR~;
-    defer (void)file.close();
-
-    String? content = linsys::read_file(file);
-    if (catch content) return linsys::IO_ERROR~;
-
+    String content  = linsys::read_proc_stream(tmem, stream)!;
     String[] fields = parse_proc_stat_fields(tmem, content)!;
 
-    PageFault pf;
+    if (fields.len <= 9) return linsys::PARSE_ERROR~;
 
+    PageFault pf = { };
     linsys::@try_field(pf.minor, fields[7].to_int(), "page_fault::minor", 0);
     linsys::@try_field(pf.major, fields[9].to_int(), "page_fault::major", 0);
 
@@ -1629,15 +1728,16 @@ struct CtxSwitches {
  @require pid > 0 : "pid must be positive"
 *>
 fn CtxSwitches? ctx_switches(int pid) => @pool() {
-    String path = string::tformat("/proc/%d/status", pid);
-    File? file  = file::open(path, "r");
-    defer (void)file.close();
+    ProcContext ctx = open_proc_context(pid)!;
+    defer close_proc_context(ctx);
 
-    if (catch file) return linsys::IO_ERROR~;
+    CFile stream = open_proc_stream(ctx, "status")!;
+    defer (void)libc::fclose(stream);
 
-    CtxSwitches switches;
+    String content       = linsys::read_proc_stream(tmem, stream)!;
+    CtxSwitches switches = { };
 
-    while (try line = io::treadline(&file)) {
+    foreach (line : content.tsplit("\n")) {
         sz? idx = line.index_of_char(':');
         if (catch idx) continue;
 
@@ -1677,14 +1777,15 @@ struct ProcessCgroup {
  @require pid > 0 : "pid must be positive"
 *>
 fn ProcessCgroup? cgroup(Allocator allocator, int pid) => @pool() {
-    String path = string::tformat("/proc/%d/cgroup", pid);
+    ProcContext ctx = open_proc_context(pid)!;
+    defer close_proc_context(ctx);
 
-    File? file = file::open(path, "r");
-    defer (void)file.close();
+    CFile stream = open_proc_stream(ctx, "cgroup")!;
+    defer (void)libc::fclose(stream);
 
-    if (catch file) return linsys::IO_ERROR~;
+    String content = linsys::read_proc_stream(tmem, stream)!;
 
-    while (try line = io::treadline(&file)) {
+    foreach (line : content.tsplit("\n")) {
         line = line.trim();
 
         String[] fields = line.split(tmem, ":");
@@ -1728,7 +1829,7 @@ enum NamespaceType {
     TIME,
 }
 
-fn Namespace? namespace(Allocator allocator, int pid, NamespaceType type) => @pool() {
+fn Namespace? namespace_helper(ProcContext ctx, NamespaceType type) @private => @pool() {
     String name;
 
     switch (type) {
@@ -1742,27 +1843,30 @@ fn Namespace? namespace(Allocator allocator, int pid, NamespaceType type) => @po
         case NamespaceType.TIME: name = "time";
     }
 
-    String path = string::tformat("/proc/%d/ns/%s", pid, name);
+    String path   = string::tformat("ns/%s", name);
+    String target = readlinkat_alloc(tmem, ctx.dirfd, path.zstr_tcopy())!;
 
-    String? target = process::readlink_alloc(tmem, (ZString)path);
-    if (catch target) return linsys::READ_LINK_ERROR~;
+    sz start = target.index_of_char('[')!;
+    sz end   = target.index_of_char(']')!;
 
-    sz? start = target.index_of_char('[');
-    if (catch start) return linsys::IO_ERROR~;
+    if (end <= start + 1) return linsys::PARSE_ERROR~;
 
-    sz? end = target.index_of_char(']');
-    if (catch end) return linsys::IO_ERROR~;
+    ulong inode = target[start + 1..end].to_ulong()!;
 
-    ulong inode = target[start + 1..end - 1].to_ulong()!;
-
-    Namespace result;
-    result.type = type;
-    result.inode = inode;
-
-    return result;
+    return { .type = type, .inode = inode };
 }
 
-fn Namespace[] namespaces(Allocator allocator, int pid) => @pool() {
+fn Namespace? namespace(Allocator allocator, int pid, NamespaceType type) => @pool() {
+    ProcContext ctx = open_proc_context(pid)!;
+    defer close_proc_context(ctx);
+
+    return namespace_helper(ctx, type);
+}
+
+fn Namespace[]? namespaces(Allocator allocator, int pid) => @pool() {
+    ProcContext ctx = open_proc_context(pid)!;
+    defer close_proc_context(ctx);
+
     List{Namespace} result;
     result.init(allocator);
     defer result.free();
@@ -1779,7 +1883,7 @@ fn Namespace[] namespaces(Allocator allocator, int pid) => @pool() {
     };
 
     foreach (type : types) {
-        Namespace? ns = namespace(allocator, pid, type);
+        Namespace? ns = namespace_helper(ctx, type);
         if (catch ns) continue;
 
         result.push(ns);
@@ -1883,19 +1987,19 @@ struct SchedStat {
 }
 
 fn SchedStat? sched_stat(int pid) => @pool() {
-    String path = string::tformat("/proc/%d/schedstat", pid);
+    ProcContext ctx = open_proc_context(pid)!;
+    defer close_proc_context(ctx);
 
-    File? file = file::open(path, "r");
-    if (catch file) return linsys::IO_ERROR~;
+    CFile stream = open_proc_stream(ctx, "schedstat")!;
+    defer (void)libc::fclose(stream);
 
-    String? line = io::treadline(&file);
-    if (catch line) return linsys::IO_ERROR~;
+    String content  = linsys::read_proc_stream(tmem, stream)!;
+    String[] fields = linsys::split_whitespace(content.trim());
 
-    String[] fields = linsys::split_whitespace(line);
+    if (fields.len < 3) return linsys::PARSE_ERROR~;
 
-    if (fields.len < 3) return linsys::IO_ERROR~;
+    SchedStat result = { };
 
-    SchedStat result;
     linsys::@try_field(result.run_time_ns, fields[0].to_ulong(), "sched_stat::run_time_ns", 0);
 
     linsys::@try_field(

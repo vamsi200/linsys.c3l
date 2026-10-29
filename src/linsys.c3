@@ -23,7 +23,8 @@ faultdef
     TERMINAL_NOT_FOUND,
     READ_LINK_ERROR,
     INVALID_ARGUMENT,
-    USER_NOT_FOUND;
+    USER_NOT_FOUND,
+    ACCESS_DENIED;
 
 macro void free_slice(slice, Allocator allocator) @private {
     $assert $defined(slice[0].free(allocator)) : "element type must have .free(Allocator)";
@@ -225,4 +226,19 @@ fn ulong? read_total_cpu_time() @private => @pool() {
         + split[5].to_ulong()!
         + split[6].to_ulong()!
         + split[7].to_ulong()!;
+}
+
+fn fault errno_to_fault() @private {
+    switch (libc::errno()) {
+        case EACCES:
+        case EPERM:
+            return linsys::ACCESS_DENIED;
+
+        case ENOENT:
+        case ESRCH:
+            return linsys::NOT_FOUND;
+
+        default:
+            return linsys::IO_ERROR;
+    }
 }
