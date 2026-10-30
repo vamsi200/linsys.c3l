@@ -8,6 +8,7 @@ import std::collections::list;
 import std::net;
 import std::os::posix;
 import std::thread;
+import std::collections::maybe;
 
 struct SystemCpuTimes {
     double user;
@@ -42,7 +43,7 @@ struct CpuStats {
     ulong ctx_switches;
     ulong interrupts;
     ulong soft_interrupts;
-    ulong syscalls;
+    Maybe{ulong} syscalls;
 }
 
 struct LoadAvg {
@@ -68,7 +69,7 @@ struct CpuUsage {
     double iowait_percent;
 }
 
-struct CpuTemp {
+struct ThermalZones {
     String sensor;
     double current;
     double critical;
@@ -87,8 +88,8 @@ struct PressureInfo {
 }
 
 fn PressureInfo? parse_psi(String content, String ctx) @private {
-    PressureInfo info;
-    String[] lines = content.split(tmem, "\n");
+    PressureInfo info = { };
+    String[] lines    = content.split(tmem, "\n");
 
     foreach (line : lines) {
         if (line.len == 0) continue;
@@ -172,8 +173,17 @@ fn SystemCpuTimes? cpu_times() => @pool() {
         0
     );
 
-    user -= guest;
-    nice -= guest_nice;
+    if (guest <= user) {
+        user -= guest;
+    } else {
+        linsys::push_error("systemcputimes::guest", linsys::PARSE_ERROR);
+    }
+
+    if (guest_nice <= nice) {
+        nice -= guest_nice;
+    } else {
+        linsys::push_error("systemcputimes::guest", linsys::PARSE_ERROR);
+    }
 
     return {
         .user = user,
@@ -301,12 +311,8 @@ fn SystemCpuSnapshot? cpu_snapshot() => @pool() {
 
     if (line.starts_with("cpu ")) {
         String[] fields = linsys::split_whitespace(line);
-        ulong total     = 0;
         ulong idle      = 0;
-
-        foreach (field : fields[1..]) {
-            total += field.to_ulong()!;
-        }
+        ulong total     = cpu_total_ticks(fields)!;
 
         if (fields.len > 4) idle = fields[4].to_ulong()!;
 
@@ -322,6 +328,19 @@ fn SystemCpuSnapshot? cpu_snapshot() => @pool() {
     return linsys::PARSE_ERROR~;
 }
 
+fn ulong? cpu_total_ticks(String[] fields) @private {
+    if (fields.len < 5) return linsys::PARSE_ERROR~;
+
+    ulong total = 0;
+
+    // user, nice, system, idle, iowait, irq, softirq, steal
+    for (usz i = 1; i < fields.len && i <= 8; i++) {
+        total += fields[i].to_ulong()!;
+    }
+
+    return total;
+}
+
 fn SystemCpuSnapshot[]? cpu_snapshot_percpu(Allocator allocator) => @pool() {
     File file = file::open("/proc/stat", "r")!;
     defer (void)file.close();
@@ -329,21 +348,19 @@ fn SystemCpuSnapshot[]? cpu_snapshot_percpu(Allocator allocator) => @pool() {
     cs.init(allocator);
     defer cs.free();
 
-    ulong total = 0;
-    ulong idle  = 0;
-
     while (try line = io::treadline(&file)) {
-        if (!line.starts_with("cpu")) continue;
-        if (line.starts_with("cpu ")) continue;
+        if (!line.starts_with("cpu") || line.starts_with("cpu ")) continue;
 
         String[] fields = linsys::split_whitespace(line);
-
-        foreach (field : fields[1..]) {
-            total += field.to_ulong() ?? 0;
+        if (fields.len < 5) {
+            linsys::push_error("systemcputimes::line", linsys::PARSE_ERROR);
+            continue;
         }
 
-        if (fields.len > 4) idle = fields[4].to_ulong() ?? 0;
+        ulong idle  = 0;
+        ulong total = cpu_total_ticks(fields)!;
 
+        idle = fields[4].to_ulong() ?? 0;
         if (fields.len > 5) idle += fields[5].to_ulong() ?? 0;
 
         cs.push({ .total = total, .idle = idle });
@@ -356,12 +373,12 @@ fn void SystemCpuSnapshot[].free(self, Allocator allocator) => linsys::free_slic
 fn void SystemCpuSnapshot.free(self, Allocator allocator) => linsys::free_fields(self, allocator);
 
 fn double cpu_percent(SystemCpuSnapshot old, SystemCpuSnapshot new) {
+    if (new.total <= old.total || new.idle < old.idle) return 0.0;
+
     ulong total_delta = new.total - old.total;
     ulong idle_delta  = new.idle - old.idle;
 
-    if (total_delta == 0) {
-        return 0.0;
-    }
+    if ((idle_delta > total_delta) || (total_delta == 0)) return 0.0;
 
     return ((double)(total_delta - idle_delta) / (double)total_delta) * 100.0;
 }
@@ -393,51 +410,78 @@ fn double[]? cpu_percent_percpu(
     return out;
 }
 
-fn CpuCount? cpu_count() {
-    @pool() {
-        File file = file::open("/proc/cpuinfo", "r")!;
-        defer (void)file.close();
-        int logical = 0;
+fn CpuCount? cpu_count() => @pool() {
+    Path path        = path::new(tmem, "/sys/devices/system/cpu")!;
+    PathList entries = io::path::ls(tmem, path)!;
 
-        List{int} physical_ids;
-        physical_ids.init(tmem);
-        defer physical_ids.free();
+    List{long} core_ids;
+    core_ids.init(tmem);
+    defer core_ids.free();
 
-        while (try line = io::treadline(&file)) {
-            if (line.starts_with("processor")) {
-                logical++;
-            }
+    int logical  = 0;
+    int physical = 0;
 
-            if (!line.starts_with("physical id")) {
-                continue;
-            }
+    foreach (entry : entries) {
+        String name = entry.file_tbasename()!;
 
-            String[] split = line.split(tmem, ":");
+        if (!name.starts_with("cpu")) continue;
 
-            if (split.len < 2) {
-                continue;
-            }
+        String suffix = name[3..];
 
-            if (try int id = split[1].trim().to_int()) {
-                bool exists = false;
+        if (catch suffix.to_int()) continue;
 
-                foreach (pid : physical_ids) {
-                    if (pid == id) {
-                        exists = true;
-                        break;
-                    }
-                }
+        String online_path = string::tformat("/sys/devices/system/cpu/%s/online", name);
 
-                if (!exists) {
-                    physical_ids.push(id);
-                }
+        File? online_file = file::open(online_path, "r");
+
+        if (try File f = online_file) {
+            defer (void)f.close();
+
+            String value = linsys::read_file(f)!.trim();
+            if (value == "0") continue;
+        }
+
+        logical++;
+
+        String package_path = string::tformat(
+            "/sys/devices/system/cpu/%s/topology/physical_package_id",
+            name
+        );
+
+        String core_path = string::tformat("/sys/devices/system/cpu/%s/topology/core_id", name);
+
+        File? package_file = file::open(package_path, "r");
+        if (catch package_file) continue;
+        defer (void)package_file.close();
+
+        File? core_file = file::open(core_path, "r");
+        if (catch core_file) continue;
+        defer (void)core_file.close();
+
+        long package_id = linsys::read_file(package_file)!.trim().to_long()!;
+        long core_id    = linsys::read_file(core_file)!.trim().to_long()!;
+
+        bool exists = false;
+
+        foreach (i, existing_package : core_ids) {
+            if (i % 2 != 0) continue;
+
+            if (existing_package == package_id && core_ids[i + 1] == core_id) {
+                exists = true;
+                break;
             }
         }
 
-        return {
-            .logical = logical,
-            .physical = (int)physical_ids.len(),
-        };
+        if (!exists) {
+            core_ids.push(package_id);
+            core_ids.push(core_id);
+            physical++;
+        }
+    }
+
+    return {
+        .logical = logical,
+        .physical = physical,
     };
 }
 
@@ -460,11 +504,15 @@ fn CpuFreq? cpu_freq() => @pool() {
     File max = file::open(max_path, "r")!;
     defer (void)max.close();
 
-    cf.current = ((double)(linsys::read_file(cur)!.trim().to_ulong() ?? 0) / 1000.0);
+    ulong current, minimum, maximum;
 
-    cf.min = ((double)(linsys::read_file(min)!.trim().to_ulong() ?? 0) / 1000.0);
+    linsys::@try_field(current, linsys::read_file(cur)!.trim().to_ulong(), "cpu_freq::current", 0);
+    linsys::@try_field(minimum, linsys::read_file(min)!.trim().to_ulong(), "cpu_freq::min", 0);
+    linsys::@try_field(maximum, linsys::read_file(max)!.trim().to_ulong(), "cpu_freq::max", 0);
 
-    cf.max = ((double)(linsys::read_file(max)!.trim().to_ulong() ?? 0) / 1000.0);
+    cf.current = (double)current / 1000.0;
+    cf.min = (double)minimum / 1000.0;
+    cf.max = (double)maximum / 1000.0;
 
     return cf;
 }
@@ -485,38 +533,42 @@ fn CpuFreq[]? cpu_freq_percpu(Allocator allocator) => @pool() {
         if (!name.starts_with("cpu") || name == "cpufreq") continue;
 
         if (try name[3..].to_int()) {
-            String base = string::tformat("/sys/devices/system/cpu/%s/cpufreq", name);
-
+            String base     = string::tformat("/sys/devices/system/cpu/%s/cpufreq", name);
             String cur_path = string::tformat("%s/scaling_cur_freq", base);
-
             String min_path = string::tformat("%s/scaling_min_freq", base);
-
             String max_path = string::tformat("%s/scaling_max_freq", base);
-
-            File? cur = file::open(cur_path, "r");
-            if (catch cur) continue;
-            defer (void)cur.close();
-
-            File? min = file::open(min_path, "r");
-            if (catch min) continue;
-
-            defer (void)min.close();
-
-            File? max = file::open(max_path, "r");
-            if (catch max) continue;
-            defer (void)max.close();
-
-            String cur_content = linsys::read_file(cur) ?? "".copy(allocator);
-            String min_content = linsys::read_file(min) ?? "".copy(allocator);
-            String max_content = linsys::read_file(max) ?? "".copy(allocator);
-
             ulong cur_val, min_val, max_val;
-            linsys::@try_field(cur_val, (linsys::read_file(cur) ?? "").trim()
-                .to_ulong(), "cpufreq::current", 0);
-            linsys::@try_field(min_val, (linsys::read_file(min) ?? "").trim()
-                .to_ulong(), "cpufreq::min", 0);
-            linsys::@try_field(max_val, (linsys::read_file(max) ?? "").trim()
-                .to_ulong(), "cpufreq::max", 0);
+
+
+
+            {
+                File? cur = file::open(cur_path, "r");
+                if (catch cur) continue;
+                defer (void)cur.close();
+
+                linsys::@try_field(cur_val, linsys::read_file(cur)!.trim()
+                    .to_ulong(), "cpufreq::current", 0);
+            }
+
+
+
+            {
+                File? min = file::open(min_path, "r");
+                if (catch min) continue;
+                defer (void)min.close();
+                linsys::@try_field(min_val, linsys::read_file(min)!.trim()
+                    .to_ulong(), "cpufreq::min", 0);
+            }
+
+
+
+            {
+                File? max = file::open(max_path, "r");
+                if (catch max) continue;
+                defer (void)max.close();
+                linsys::@try_field(max_val, linsys::read_file(max)!.trim()
+                    .to_ulong(), "cpufreq::max", 0);
+            }
 
             freqs.push(
                 { .current = cur_val / 1000.0, .min = min_val / 1000.0, .max = max_val / 1000.0 }
@@ -563,7 +615,11 @@ fn CpuStats? cpu_stats() => @pool() {
                     0
                 );
             case "syscalls":
-                linsys::@try_field(stats.syscalls, fields[1].to_ulong(), "cpustats::syscalls", 0);
+                if (try ulong count = fields[1].to_ulong()) {
+                    stats.syscalls.set(count);
+                } else {
+                    linsys::push_error("cpustats::syscalls", linsys::PARSE_ERROR);
+                }
         }
     }
 
@@ -594,100 +650,193 @@ fn LoadAvg? load_avg() => @pool() {
 fn CpuInfo[]? cpu_info(Allocator allocator) => @pool() {
     File file = file::open("/proc/cpuinfo", "r")!;
     defer (void)file.close();
+
     List{CpuInfo} infos;
     infos.init(allocator);
-    defer infos.free();
-    CpuInfo current = { };
+
+    CpuInfo current  = { };
+    bool transferred = false;
+
+    defer {
+        if (!transferred) {
+            foreach (info : infos) {
+                info.free(allocator);
+            }
+
+            current.free(allocator);
+        }
+
+        infos.free();
+    }
 
     while (try line = io::treadline(&file)) {
+        line = line.trim();
+
         if (line.len == 0) {
-            infos.push(current);
-            current = { };
+            if (current.vendor.len > 0 || current.model.len > 0 || current.flags.len > 0
+                || current.cores > 0
+                || current.siblings > 0
+                || current.mhz > 0) {
+                infos.push(current);
+                current = { };
+            }
+
             continue;
         }
 
         String[] split = line.split(tmem, ":");
-
-        if (split.len < 2) {
-            continue;
-        }
+        if (split.len < 2) continue;
 
         String key = split[0].trim();
         String val = split[1].trim();
 
         switch (key) {
             case "vendor_id":
+            case "CPU implementer":
+                if (current.vendor.len > 0) {
+                    mem::alloc::free(allocator, current.vendor);
+                }
                 current.vendor = val.copy(allocator);
+
             case "model name":
+            case "Processor":
+            case "Hardware":
+                if (current.model.len > 0) {
+                    mem::alloc::free(allocator, current.model);
+                }
                 current.model = val.copy(allocator);
+
             case "cpu MHz":
                 linsys::@try_field(current.mhz, val.to_double(), "cpuinfo::mhz", 0);
+
             case "cache size":
                 String size = val.strip_suffix(" KB").trim();
+
                 linsys::@try_field(current.cache_size, size.to_int(), "cpuinfo::cache_size", 0);
+
             case "cpu cores":
                 linsys::@try_field(current.cores, val.to_int(), "cpuinfo::cores", 0);
+
             case "siblings":
                 linsys::@try_field(current.siblings, val.to_int(), "cpuinfo::siblings", 0);
+
             case "flags":
+            case "Features":
+                if (current.flags.len > 0) {
+                    mem::alloc::free(allocator, current.flags);
+                }
                 current.flags = val.copy(allocator);
         }
     }
 
-    if (current.model.len > 0 || current.vendor.len > 0) infos.push(current);
+    if (current.vendor.len > 0 || current.model.len > 0 || current.flags.len > 0
+        || current.cores > 0
+        || current.siblings > 0
+        || current.mhz > 0) {
+        infos.push(current);
+        current = { };
+    }
 
-    return infos.to_array(allocator);
+    CpuInfo[] output = infos.to_array(allocator);
+    transferred = true;
+
+    return output;
 }
 
 fn void CpuInfo[].free(self, Allocator allocator) => linsys::free_slice(self, allocator);
 fn void CpuInfo.free(self, Allocator allocator) => linsys::free_fields(self, allocator);
 
-fn CpuTemp[]? cpu_temps(Allocator allocator) => @pool() {
-    Path path = path::new(tmem, "/sys/class/thermal")!;
+fn ThermalZones[]? thermal_zones(Allocator allocator) => @pool() {
+    Path path        = path::new(tmem, "/sys/class/thermal")!;
+    PathList entries = io::path::ls(tmem, path)!;
 
-    PathList list = io::path::ls(tmem, path)!;
-
-    List{CpuTemp} temps;
+    List{ThermalZones} temps;
     temps.init(allocator);
-    defer temps.free();
 
-    foreach (entry : list) {
-        String name = entry.file_tbasename()!;
+    bool transferred = false;
 
-        if (!name.starts_with("thermal_zone")) continue;
-
-        String base = string::tformat("/sys/class/thermal/%s", name);
-
-        String temp_path = string::tformat("%s/temp", base);
-
-        String type_path = string::tformat("%s/type", base);
-
-        File? tf = file::open(temp_path, "r");
-        if (catch tf) continue;
-        defer (void)tf.close();
-
-        File? ty = file::open(type_path, "r");
-        if (catch ty) continue;
-        defer (void)ty.close();
-
-        double current = ((double)(linsys::read_file(tf)!.trim().to_long() ?? 0) / 1000.0);
-
-        String sensor = linsys::read_file(ty)!.trim().copy(allocator);
-
-        temps.push(
-            {
-                .sensor = sensor,
-                .current = current,
-                .critical = 0.0,
+    defer {
+        if (!transferred) {
+            foreach (temp : temps) {
+                temp.free(allocator);
             }
-        );
+        }
+
+        temps.free();
     }
 
-    return temps.to_array(allocator);
+    foreach (entry : entries) {
+        @pool() {
+            String name = entry.file_tbasename()!;
+
+            if (!name.starts_with("thermal_zone")) continue;
+
+            String base = string::tformat("/sys/class/thermal/%s", name);
+
+            String temp_path = string::tformat("%s/temp", base);
+            String type_path = string::tformat("%s/type", base);
+
+            File? maybe_temp = file::open(temp_path, "r");
+
+            if (catch err = maybe_temp) {
+                linsys::push_error("thermal::temp", err);
+                continue;
+            }
+
+            File tf = maybe_temp;
+            defer (void)tf.close();
+
+            File? maybe_type = file::open(type_path, "r");
+
+            if (catch err = maybe_type) {
+                linsys::push_error("thermal::type", err);
+                continue;
+            }
+
+            File ty = maybe_type;
+            defer (void)ty.close();
+
+            String? maybe_temp_content = linsys::read_file(tf);
+
+            if (catch err = maybe_temp_content) {
+                linsys::push_error("thermal::temp", err);
+                continue;
+            }
+
+            String? maybe_type_content = linsys::read_file(ty);
+
+            if (catch err = maybe_type_content) {
+                linsys::push_error("thermal::type", err);
+                continue;
+            }
+
+            long? maybe_value = maybe_temp_content.trim().to_long();
+
+            if (catch err = maybe_value) {
+                linsys::push_error("thermal::temp", err);
+                continue;
+            }
+
+            String type_name = maybe_type_content.trim();
+
+            temps.push(
+                {
+                    .sensor = type_name.copy(allocator),
+                    .current = (double)maybe_value / 1000.0,
+                    .critical = 0.0,
+                }
+            );
+        };
+    }
+
+    ThermalZones[] output = temps.to_array(allocator);
+    transferred = true;
+
+    return output;
 }
 
-fn void CpuTemp[].free(self, Allocator allocator) => linsys::free_slice(self, allocator);
-fn void CpuTemp.free(self, Allocator allocator) => linsys::free_fields(self, allocator);
+fn void ThermalZones[].free(self, Allocator allocator) => linsys::free_slice(self, allocator);
+fn void ThermalZones.free(self, Allocator allocator) => linsys::free_fields(self, allocator);
 
 fn CpuUsage cpu_usage(SystemCpuTimes old, SystemCpuTimes new) {
     double old_total = old.user + old.nice + old.system + old.idle + old.iowait + old.irq
@@ -750,26 +899,21 @@ fn String? os_release(Allocator allocator) {
     return linsys::NOT_FOUND~;
 }
 
-macro ulong boot_time() {
-    static ulong cached = 0;
-    if (cached == 0) cached = read_boot_time() ?? 0;
-    return cached;
+fn ulong? boot_time() {
+    return read_boot_time();
 }
 
 fn ulong? read_boot_time() @private {
     File file = file::open("/proc/stat", "r")!;
     defer (void)file.close();
-    ulong btime;
 
     while (try line = io::treadline(&file)) {
-        if (line.contains("btime")) {
-            String s = line.strip_prefix("btime ");
-            btime = s.to_ulong()!;
-            break;
-        }
+        if (!line.starts_with("btime ")) continue;
+
+        return line.strip_prefix("btime ").trim().to_ulong();
     }
 
-    return btime;
+    return linsys::PARSE_ERROR~;
 }
 
 macro ulong clktck() {
@@ -839,10 +983,20 @@ fn String? utmp_string(char* value, sz capacity, Allocator allocator) @private =
     return ((String)value[..len]).copy(allocator);
 }
 
-fn Users[] users(Allocator allocator) => @pool() {
+fn Users[]? users(Allocator allocator) => @pool() {
     List{Users} result;
     result.init(allocator);
-    defer result.free();
+    bool transferred = false;
+
+    defer {
+        if (!transferred) {
+            foreach (entry : result) {
+                entry.free(allocator);
+            }
+        }
+
+        result.free();
+    }
 
     setutent();
     defer endutent();
@@ -850,21 +1004,42 @@ fn Users[] users(Allocator allocator) => @pool() {
     while (true) {
         Utmp* entry = getutent();
         if (entry == null) break;
-
         if (entry.type != 7) continue;
 
-        Users user;
+        Users user            = { };
+        bool user_transferred = false;
 
-        user.name = utmp_string(&entry.user, 32, allocator)!!;
-        user.terminal = utmp_string(&entry.line, 32, allocator)!!;
-        user.host = utmp_string(&entry.host, 256, allocator)!!;
-        user.started = (long)entry.tv.tv_sec;
-        user.pid = entry.pid;
 
-        result.push(user);
+
+        {
+            defer if (!user_transferred) user.free(allocator);
+
+            user.name = utmp_string(&entry.user, 32, allocator)!;
+
+            user.terminal = utmp_string(&entry.line, 32, allocator)!;
+
+            user.host = utmp_string(&entry.host, 256, allocator)!;
+
+            user.started = (long)entry.tv.tv_sec;
+            user.pid = entry.pid;
+
+            result.push(user);
+            user_transferred = true;
+        }
     }
 
-    return result.to_array(allocator);
+    Users[] output = result.to_array(allocator);
+    transferred = true;
+
+    return output;
+}
+
+fn void Users.free(self, Allocator allocator) {
+    linsys::free_fields(self, allocator);
+}
+
+fn void Users[].free(self, Allocator allocator) {
+    linsys::free_slice(self, allocator);
 }
 
 // Will need to split Cgroups, if it becomes fairly large
@@ -886,8 +1061,7 @@ struct CgroupInfo {
 }
 
 fn void? cgroup_walk(Allocator allocator, String path, List{Cgroup}* result) @private => @pool() {
-    PathList? entries = io::path::ls(tmem, (Path)path)!;
-    if (catch entries) return linsys::IO_ERROR~;
+    PathList entries = io::path::ls(tmem, (Path)path)!;
 
     foreach (entry : entries) {
         String child = string::tformat("%s/%s", path, entry);
@@ -898,57 +1072,100 @@ fn void? cgroup_walk(Allocator allocator, String path, List{Cgroup}* result) @pr
 
         List{String} controllers;
         controllers.init(allocator);
-        defer controllers.free();
 
-        File? file = file::open(controllers_path, "r");
-        defer (void)file.close();
+        bool controllers_transferred = false;
 
-        if (try f = file) {
-            if (try line = io::treadline(&f)) {
-                String[] fields = linsys::split_whitespace(line);
 
-                foreach (field : fields) {
-                    controllers.push(field.copy(allocator));
+
+        {
+            defer {
+                if (!controllers_transferred) {
+                    foreach (controller : controllers) {
+                        mem::alloc::free(allocator, controller);
+                    }
+                }
+
+                controllers.free();
+            }
+
+            File? maybe_file = file::open(controllers_path, "r");
+
+            if (try File f = maybe_file) {
+                defer (void)f.close();
+
+                if (try line = io::treadline(&f)) {
+                    String[] fields = linsys::split_whitespace(line);
+
+                    foreach (field : fields) {
+                        controllers.push(field.copy(allocator));
+                    }
                 }
             }
+
+            Cgroup group           = { };
+            bool group_transferred = false;
+
+
+
+            {
+                defer if (!group_transferred) group.free(allocator);
+
+                group.path = child.copy(allocator);
+
+                sz? slash = child.rindex_of_char('/');
+
+                if (catch slash) {
+                    group.name = child.copy(allocator);
+                } else {
+                    group.name = child[slash + 1..].copy(allocator);
+                }
+
+                group.controllers = controllers.to_array(allocator);
+                controllers_transferred = true;
+
+                result.push(group);
+                group_transferred = true;
+            }
         }
-
-        Cgroup group;
-
-        group.path = child.copy(allocator);
-
-        sz? slash = child.rindex_of_char('/');
-        if (catch slash) {
-            group.name = child.copy(allocator);
-        } else {
-            group.name = child[slash + 1..].copy(allocator);
-        }
-
-        group.controllers = controllers.to_array(allocator);
-
-        result.push(group);
 
         cgroup_walk(allocator, child, result)!;
     }
 }
 
 fn void Cgroup[].free(self, Allocator allocator) => linsys::free_slice(self, allocator);
-fn void Cgroup.free(self, Allocator allocator) => linsys::free_fields(self, allocator);
+fn void Cgroup.free(self, Allocator allocator) {
+    mem::alloc::free(allocator, self.path);
+    mem::alloc::free(allocator, self.name);
+
+    foreach (controller : self.controllers) {
+        mem::alloc::free(allocator, controller);
+    }
+
+    mem::alloc::free(allocator, self.controllers);
+}
 
 fn Cgroup[]? cgroups(Allocator allocator) => @pool() {
     List{Cgroup} result;
     result.init(allocator);
 
+    bool transferred = false;
+
     defer {
-        foreach (group : result) {
-            group.free(allocator);
+        if (!transferred) {
+            foreach (group : result) {
+                group.free(allocator);
+            }
         }
+
         result.free();
     }
 
     cgroup_walk(allocator, "/sys/fs/cgroup", &result)!;
 
-    return result.to_array(allocator);
+    Cgroup[] output = result.to_array(allocator);
+    transferred = true;
+
+    return output;
 }
 
 fn CgroupInfo? cgroup_info(Allocator allocator) @private => @pool() {

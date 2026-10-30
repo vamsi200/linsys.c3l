@@ -61,7 +61,7 @@ fn BatteryStatus battery_status(String s) @private {
 fn void? parse_sensor_temperatures(
     Allocator allocator,
     SensorPath[] paths,
-    List{SensorTemperature}* out
+    List{SensorTemperature}* out,
 ) @private {
     foreach (p : paths) {
         ulong? raw = linsys::read_ulong_file(p.input);
@@ -69,15 +69,14 @@ fn void? parse_sensor_temperatures(
 
         double current  = (double)raw / 1000.0;
         double critical = 0.0;
-        ulong? crit_raw = linsys::read_ulong_file(p.crit);
 
-        if (try crit_raw) {
-            critical = (double)crit_raw / 1000.0;
+        if (try ulong crit = linsys::read_ulong_file(p.crit)) {
+            critical = (double)crit / 1000.0;
         }
 
         out.push(
             {
-                .name = p.name,
+                .name = p.name.copy(allocator),
                 .current = current,
                 .critical = critical,
             }
@@ -90,7 +89,16 @@ fn SensorPath[]? get_sensor_paths(Allocator allocator) @private => @pool() {
     PathList list = io::path::ls(tmem, path)!;
     List{SensorPath} paths;
     paths.init(allocator);
-    defer paths.free();
+    bool transferred = false;
+
+    defer {
+        if (!transferred) {
+            foreach (p : paths) {
+                p.free(allocator);
+            }
+        }
+        paths.free();
+    }
 
     foreach (entry : list) {
         String hwmon     = entry.file_tbasename()!;
@@ -124,22 +132,43 @@ fn SensorPath[]? get_sensor_paths(Allocator allocator) @private => @pool() {
                 ), .name = string::format(allocator, "%s-temp%d", sensor_name, i), });
         }
     }
-    return paths.to_array(allocator);
+
+    SensorPath[] result = paths.to_array(allocator);
+    transferred = true;
+    return result;
 }
 
-fn void SensorPath[].free(self, Allocator allocator) => linsys::free_slice(self, allocator);
+fn void SensorPath[].free(self, Allocator allocator) {
+    foreach (p : self) {
+        p.free(allocator);
+    }
+    mem::alloc::free(allocator, self);
+}
 fn void SensorPath.free(self, Allocator allocator) => linsys::free_fields(self, allocator);
 
 fn SensorTemperature[]? temperatures(Allocator allocator) => @pool() {
     SensorPath[] paths = get_sensor_paths(allocator)!;
-    defer linsys::free_slice(paths, allocator);
+    defer paths.free(allocator);
 
     List{SensorTemperature} out;
     out.init(allocator);
-    defer out.free();
+
+    bool transferred = false;
+
+    defer {
+        if (!transferred) {
+            foreach (temp : out) {
+                temp.free(allocator);
+            }
+        }
+        out.free();
+    }
 
     parse_sensor_temperatures(allocator, paths, &out)!;
-    return out.to_array(allocator);
+
+    SensorTemperature[] result = out.to_array(allocator);
+    transferred = true;
+    return result;
 }
 
 fn void SensorTemperature[].free(self, Allocator allocator) => linsys::free_slice(self, allocator);
@@ -152,17 +181,24 @@ struct SensorPoller {
 }
 
 fn SensorPoller? sensor_poller(Allocator allocator) {
+    SensorPath[] paths = get_sensor_paths(allocator)!;
+
     List{SensorTemperature} list;
     list.init(allocator);
+
     return {
-        .paths = get_sensor_paths(allocator)!,
+        .paths = paths,
         .list = list,
         .allocator = allocator,
     };
 }
 
 fn void SensorPoller.close(&self) {
-    linsys::free_slice(self.paths, self.allocator);
+    foreach (p : self.paths) {
+        p.free(self.allocator);
+    }
+    mem::alloc::free(self.allocator, self.paths);
+
     self.list.free();
 }
 
@@ -240,17 +276,32 @@ fn void? parse_sensor_fans(
     }
 }
 
+fn void FanPath[].free(self, Allocator allocator) => linsys::free_slice(self, allocator);
 fn void FanPath.free(self, Allocator allocator) => linsys::free_fields(self, allocator);
 
 fn SensorFan[]? fans(Allocator allocator) => @pool() {
     FanPath[] paths = find_fan_paths(allocator)!;
-    defer linsys::free_slice(paths, allocator);
+    defer paths.free(allocator);
 
     List{SensorFan} out;
     out.init(allocator);
-    defer out.free();
+
+    bool transferred = false;
+
+    defer {
+        if (!transferred) {
+            foreach (fan : out) {
+                fan.free(allocator);
+            }
+        }
+        out.free();
+    }
+
     parse_sensor_fans(allocator, paths, &out, true)!;
-    return out.to_array(allocator);
+
+    SensorFan[] result = out.to_array(allocator);
+    transferred = true;
+    return result;
 }
 
 fn void SensorFan[].free(self, Allocator allocator) => linsys::free_slice(self, allocator);
@@ -263,10 +314,13 @@ struct FanPoller {
 }
 
 fn FanPoller? fan_poller(Allocator allocator) {
+    FanPath[] paths = find_fan_paths(allocator)!;
+
     List{SensorFan} list;
     list.init(allocator, 8);
+
     return {
-        .paths = find_fan_paths(allocator)!,
+        .paths = paths,
         .list = list,
         .allocator = allocator,
     };
@@ -293,7 +347,16 @@ fn SensorBattery[]? batteries(Allocator allocator) {
         PathList list = io::path::ls(tmem, path)!;
         List{SensorBattery} bats;
         bats.init(allocator);
-        defer bats.free();
+        bool transferred = false;
+
+        defer {
+            if (!transferred) {
+                foreach (bat : bats) {
+                    bat.free(allocator);
+                }
+            }
+            bats.free();
+        }
 
         foreach (entry : list) {
             String name      = entry.file_tbasename()!;
@@ -320,33 +383,47 @@ fn SensorBattery[]? batteries(Allocator allocator) {
                 "sensor_battery::percent",
                 0
             );
-            linsys::@try_field(
-                bat.energy_now,
-                linsys::read_ulong_file(string::tformat("%s/energy_now", base)),
-                "sensor_battery::energy_now",
-                0
-            );
-            linsys::@try_field(
-                bat.energy_full,
-                linsys::read_ulong_file(string::tformat("%s/energy_full", base)),
-                "sensor_battery::energy_full",
-                0
-            );
-            linsys::@try_field(
-                bat.power_now,
-                linsys::read_ulong_file(string::tformat("%s/power_now", base)),
-                "sensor_battery::power_now",
-                0
-            );
+            String energy_now_path  = string::tformat("%s/energy_now", base);
+            String energy_full_path = string::tformat("%s/energy_full", base);
+            String power_now_path   = string::tformat("%s/power_now", base);
+
+            ulong? energy_now  = linsys::read_ulong_file(energy_now_path);
+            ulong? energy_full = linsys::read_ulong_file(energy_full_path);
+            ulong? power_now   = linsys::read_ulong_file(power_now_path);
+
+            if (try ulong value = energy_now) bat.energy_now = value;
+            if (try ulong value = energy_full) bat.energy_full = value;
+            if (try ulong value = power_now) bat.power_now = value;
+
             bat.percent = (double)capacity;
 
+            if (bat.status == BatteryStatus.DISCHARGING && bat.secs_left == 0) {
+                ulong? charge_now = linsys::read_ulong_file(string::tformat("%s/charge_now", base));
+                ulong? current_now = linsys::read_ulong_file(
+                    string::tformat("%s/current_now", base)
+                );
+
+                if (try ulong charge = charge_now) {
+                    if (try ulong current = current_now) {
+                        if (current > 0) {
+                            bat.secs_left = (long)(((double)charge / (double)current) * 3600.0);
+                        }
+                    }
+                }
+            }
 
             if (bat.power_now > 0 && bat.energy_now > 0) {
-                bat.secs_left = ((long)((double)bat.energy_now / (double)bat.power_now)) * 3600;
+                if (bat.status == BatteryStatus.DISCHARGING && bat.power_now > 0
+                    && bat.energy_now > 0) {
+                    bat.secs_left = (long)(((double)bat.energy_now / (double)bat.power_now)
+                        * 3600.0);
+                }
             }
             bats.push(bat);
         }
-        return bats.to_array(allocator);
+        SensorBattery[] result = bats.to_array(allocator);
+        transferred = true;
+        return result;
     };
 }
 

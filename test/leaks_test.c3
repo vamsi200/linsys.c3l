@@ -10,11 +10,12 @@ macro void @tracker(; @body(alloc)) {
         tracker.init(tmem);
         defer tracker.free();
         defer if (tracker.has_leaks()) tracker.print_report();
-
         {
             @body(&tracker);
         }
-        assert (!tracker.has_leaks() , "memory leak detected");
+
+        tracker.print_report();
+        assert (!tracker.has_leaks()); 
     };
 }
 
@@ -91,14 +92,6 @@ fn void test_cpu_info() @test {
     };
 }
 
-fn void test_cpu_temps() @test {
-    @tracker(; Allocator alloc) {
-        CpuTemp[]? sc = system::cpu_temps(alloc);
-        if (catch sc) return;
-        sc.free(alloc);
-    };
-}
-
 fn void test_net_conn_poller() @test {
     @tracker(; Allocator alloc) {
         NetConnPoller poller = network::poller(alloc)!!;
@@ -147,7 +140,7 @@ fn void test_net_io_counters() @test {
 
 fn void test_boot_time() @test {
     @assert_leak() {
-        ulong bt = system::boot_time();
+        ulong bt = system::boot_time()!!;
     };
 }
 
@@ -223,7 +216,7 @@ fn void test_io_poller_poll() @test {
         d.init(alloc);
         DiskIoPoller poller = disk::poller(alloc, &d)!!;
         poller.@poll(; DiskIoCounters[] disks) {
-            assert (disks.len >= 0);
+            assert(disks.len >= 0);
         }!!;
         poller.close();
         d.free();
@@ -247,16 +240,16 @@ fn void test_disk_context() @test {
     @tracker(; Allocator alloc) {
         disk::DiskContext ctx;
         ctx.init(alloc);
-        usz? s = ctx.sector_size("/");
+        usz? s = ctx.sector_size("nvme0n1p2");
         ctx.free();
         if (catch s) return;
-        assert (s > 0);
+        assert(s > 0);
     };
 }
 
 fn void test_cpu_temp() @test {
     @tracker(; Allocator alloc) {
-        CpuTemp[]? temps = system::cpu_temps(alloc);
+        ThermalZones[]? temps = system::thermal_zones(alloc);
         if (catch temps) return;
         temps.free(alloc);
     };
@@ -374,7 +367,7 @@ fn void test_memory_poller_poll_virtual() @test {
     @tracker(; Allocator alloc) {
         MemoryPoller poller = memory::poller(alloc)!!;
         poller.@poll_virtual(; vm) {
-            assert (vm.total > 0);
+            assert(vm.total > 0);
         }!!;
         poller.close();
     };
@@ -384,7 +377,7 @@ fn void test_memory_poller_poll_swap() @test {
     @tracker(; Allocator alloc) {
         MemoryPoller poller = memory::poller(alloc)!!;
         poller.@poll_swap(; sm) {
-            assert (sm.total > 0);
+            assert(sm.total > 0);
         }!!;
 
         poller.close();
@@ -426,7 +419,7 @@ fn void test_process_poller_io_counters() @test {
 fn void test_process_poller_exists() @test {
     @assert_leak() {
         ProcessPoller poller = process::poller(posix::getpid())!!;
-        assert (poller.exists() , "current pid should always exist");
+        assert(poller.exists(), "current pid should always exist");
     };
 }
 
@@ -474,4 +467,32 @@ fn void test_swapmemory() @test {
         SwapMemory? vm = memory::swap_memory();
         if (catch vm) return;
     };
+}
+
+fn void test_process_fd_paths_leaks() @test {
+    @tracker(; Allocator alloc) {
+        String[]? result = process::fd_paths(alloc, (int)posix::getpid());
+        if (catch result) {
+            io::printn("fd_paths failed");
+            return;
+        }
+
+        foreach (path : result) {
+            mem::alloc::free(alloc, path);
+        }
+        mem::alloc::free(alloc, result);
+    };
+}
+
+fn void test_process_memory_full_info() @test {
+    MemoryFullInfo? mfi = process::memory_full_info((int)posix::getpid());
+
+    if (catch mfi) {
+        assert(false, "memory_full_info failed");
+    }
+
+    assert(mfi.vms >= mfi.rss, "RSS exceeds VMS");
+    assert(mfi.rss > 0, "RSS is zero");
+    assert(mfi.pss <= mfi.rss, "PSS exceeds RSS");
+    assert(mfi.uss <= mfi.rss, "USS exceeds RSS");
 }

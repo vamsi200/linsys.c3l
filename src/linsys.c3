@@ -24,7 +24,8 @@ faultdef
     READ_LINK_ERROR,
     INVALID_ARGUMENT,
     USER_NOT_FOUND,
-    ACCESS_DENIED;
+    ACCESS_DENIED,
+    INVALID_LENGTH;
 
 macro void free_slice(slice, Allocator allocator) @private {
     $assert $defined(slice[0].free(allocator)) : "element type must have .free(Allocator)";
@@ -91,9 +92,12 @@ macro void @try_field_append(#v, #expr, String field, #fallback) {
     var res = #expr;
     if (catch err = res) {
         linsys::push_error(field, err);
-        #v = #fallback;
     } else {
-        #v += res;
+        if (res > ulong::max - #v) {
+            linsys::push_error(field, linsys::PARSE_ERROR);
+        } else {
+            #v += res;
+        }
     }
 }
 

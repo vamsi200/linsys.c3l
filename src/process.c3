@@ -170,7 +170,7 @@ fn ProcessInfo? info(Allocator allocator, int pid) => @pool() {
     ProcContext ctx = open_proc_context(pid)!;
     defer close_proc_context(ctx);
 
-    CFile? stream = open_proc_stream(ctx, "status");
+    CFile stream = open_proc_stream(ctx, "status")!;
     defer (void)libc::fclose(stream);
 
     char[4096] buf;
@@ -228,7 +228,12 @@ fn ProcessInfo? info(Allocator allocator, int pid) => @pool() {
                 }
 
             case "State":
-                p.state = proc_state((char)data[0]);
+                if (data.len > 0) {
+                    p.state = proc_state((char)data[0]);
+                } else {
+                    p.state = ProcState.UNKNOWN;
+                    linsys::push_error("processinfo::state", linsys::PARSE_ERROR);
+                }
 
             default:
                 continue;
@@ -293,6 +298,7 @@ fn Process? proc_helper(Allocator allocator, ProcContext ctx) @private => @pool(
 
         long? idx = line.index_of_char(':');
         if (catch idx) continue;
+        if (idx == -1) continue;
 
         String key  = line[:idx].trim();
         String data = line[idx + 1..].trim();
@@ -394,22 +400,30 @@ fn String? read_cmdline(Allocator allocator, int pid) => @pool() {
 }
 
 fn String? readlink_alloc(Allocator allocator, ZString path) @private {
-    char[256] buf;
-    DString result = dstring::new_with_capacity(allocator, 256);
-    defer result.free();
+    int capacity = 256;
+
     while (true) {
-        sz n = libc::readlink(path, &buf, buf.len);
+        char* buf = mem::alloc::malloc(allocator, capacity);
+        sz n      = libc::readlink(path, buf, (usz)capacity);
+
         if (n < 0) {
-            switch (libc::errno()) {
-                case EACCES: return linsys::PERMISSION_DENIED~;
-                case ENOENT: return linsys::PROCESS_EXITED~;
-                default: return linsys::IO_ERROR~;
-            }
+            fault err = linsys::errno_to_fault();
+            mem::alloc::free(allocator, buf);
+            return err~;
         }
-        result.append((String)buf[:n]);
-        if (n < buf.len) break;
+
+        if ((usz)n < (ulong)capacity) {
+            return (String)buf[0..(usz)n];
+        }
+
+        mem::alloc::free(allocator, buf);
+
+        if (capacity >= 1024 * 1024) {
+            return linsys::IO_ERROR~;
+        }
+
+        capacity *= 2;
     }
-    return result.copy_str(allocator);
 }
 
 extern fn sz readlinkat(CInt dirfd, ZString pathname, char* buf, usz bufsiz);
@@ -693,7 +707,7 @@ fn String? readlinkat_alloc(Allocator allocator, CInt dirfd, ZString path) @priv
         }
 
         if ((usz)n < (ulong)capacity) {
-            String result = (String)buf[0..(usz)n];
+            String result = (String)buf[0..(usz)n - 1];
             return result;
         }
 
@@ -735,18 +749,34 @@ fn OpenFile[]? open_files(Allocator allocator, int pid) => @pool() {
             continue;
         }
 
-        OpenFile entry   = { .fd = fd, .path = target };
-        String info_name = string::tformat("fdinfo/%d", fd);
-        CFile stream     = open_proc_stream(ctx, info_name.zstr_tcopy())!;
+        OpenFile entry = { .fd = fd, .path = target };
 
 
 
         {
+            bool transferred = false;
+            defer if (!transferred) entry.free(allocator);
+
+            String info_name = string::tformat("fdinfo/%d", fd);
+
+            CFile? maybe_stream = open_proc_stream(ctx, info_name.zstr_tcopy());
+
+            if (catch err = maybe_stream) {
+                linsys::push_error("openfile::fdinfo", err);
+                continue;
+            }
+
+            CFile stream = maybe_stream;
             defer (void)libc::fclose(stream);
 
-            String content = linsys::read_proc_stream(tmem, stream)!;
+            String? maybe_content = linsys::read_proc_stream(tmem, stream);
 
-            foreach (line : content.split(tmem, "\n")) {
+            if (catch err = maybe_content) {
+                linsys::push_error("openfile::fdinfo", err);
+                continue;
+            }
+
+            foreach (line : maybe_content.split(tmem, "\n")) {
                 line = line.trim();
 
                 if (!line.starts_with("flags:")) continue;
@@ -759,9 +789,10 @@ fn OpenFile[]? open_files(Allocator allocator, int pid) => @pool() {
 
                 break;
             }
-        }
 
-        of.push(entry);
+            of.push(entry);
+            transferred = true;
+        }
     }
 
     return of.to_array(allocator);
@@ -771,10 +802,68 @@ fn OpenFile[]? open_files(Allocator allocator, int pid) => @pool() {
 fn void OpenFile[].free(self, Allocator allocator) => linsys::free_slice(self, allocator);
 fn void OpenFile.free(self, Allocator allocator) => linsys::free_fields(self, allocator);
 
+fn ulong[]? socket_inodes(Allocator allocator, ProcContext ctx) @private => @pool() {
+    int[] fd_list = fds_helper(tmem, ctx)!;
+
+    List{ulong} inodes;
+    inodes.init(allocator);
+    defer inodes.free();
+
+    foreach (fd : fd_list) {
+        @pool() {
+            String fd_name = string::tformat("fd/%d", fd);
+
+            String? target = readlinkat_alloc(allocator, ctx.dirfd, fd_name.zstr_tcopy());
+            if (catch err = target) {
+                io::printf("Failed to read fd %d\n", fd);
+                continue;
+            }
+
+            defer mem::alloc::free(allocator, target);
+
+            if (!target.starts_with("socket:[") || !target.ends_with("]")) {
+                continue;
+            }
+
+            sz start = target.index_of_char('[')!;
+            sz end   = target.index_of_char(']')!;
+
+            String number = target[start + 1..end - 1];
+
+            if (try ulong inode = number.to_ulong()) {
+                bool exists = false;
+
+                foreach (existing : inodes) {
+                    if (existing == inode) {
+                        exists = true;
+                        break;
+                    }
+                }
+
+                if (!exists) inodes.push(inode);
+            } else {
+                io::printn("Parse Failed..");
+                linsys::push_error("connection::socket_inode", linsys::PARSE_ERROR);
+            }
+        };
+    }
+
+    return inodes.to_array(allocator);
+}
+
+fn bool contains_socket_inode(ulong[] inodes, ulong inode) @private {
+    foreach (item : inodes) {
+        if (item == inode) return true;
+    }
+
+    return false;
+}
+
 fn void? read_connections(
     Allocator allocator,
     ProcContext ctx,
     Protocol proto,
+    ulong[] socket_ids,
     List{Connection}* out
 ) @private => @pool() {
     String filename;
@@ -790,12 +879,12 @@ fn void? read_connections(
     defer (void)libc::fclose(stream);
 
     String content = linsys::read_proc_stream(tmem, stream)!;
-    bool is_v6     = proto == Protocol.TCP6 || proto == Protocol.UDP6;
-    ushort lp      = 0;
-    ushort rp      = 0;
+
+    bool is_v6 = proto == Protocol.TCP6 || proto == Protocol.UDP6;
 
     foreach (i, line : content.split(tmem, "\n")) {
         if (i == 0 || line.len == 0) continue;
+
         String[] raw = linsys::split_whitespace(line.trim());
 
         usz n = 0;
@@ -803,73 +892,146 @@ fn void? read_connections(
             if (f.len > 0) raw[n++] = f;
         }
 
-        if (n < 4) {
+        if (n < 10) {
             linsys::push_error("connection::line", linsys::PARSE_ERROR);
+            continue;
+        }
+
+        ulong? maybe_inode = raw[9].to_ulong();
+
+        if (catch err = maybe_inode) {
+            linsys::push_error("connection::inode", err);
+            continue;
+        }
+
+        ulong inode = maybe_inode;
+
+        if (!contains_socket_inode(socket_ids, inode)) {
             continue;
         }
 
         sz? colon_l = raw[1].index_of_char(':');
         sz? colon_r = raw[2].index_of_char(':');
+
         if (catch colon_l) {
             linsys::push_error("connection::local_addr", linsys::PARSE_ERROR);
             continue;
         }
+
         if (catch colon_r) {
             linsys::push_error("connection::remote_addr", linsys::PARSE_ERROR);
             continue;
         }
 
-        linsys::@try_field(
-            lp,
-            (ushort)(raw[1][colon_l + 1..].to_long(16)),
-            "connection::local_port",
-            0
-        );
-        linsys::@try_field(
-            rp,
-            (ushort)(raw[2][colon_l + 1..].to_long(16)),
-            "connection::remote_port",
-            0
-        );
+        long? maybe_lp = raw[1][colon_l + 1..].to_long(16);
+        long? maybe_rp = raw[2][colon_r + 1..].to_long(16);
 
-        out.push(
-            {
-                .local_addr = is_v6 ? linsys::ip_to_string_v6(
+        if (catch err = maybe_lp) {
+            linsys::push_error("connection::local_port", err);
+            continue;
+        }
+
+        if (catch err = maybe_rp) {
+            linsys::push_error("connection::remote_port", err);
+            continue;
+        }
+
+        long local_port  = maybe_lp;
+        long remote_port = maybe_rp;
+
+        if (local_port < 0 || local_port > 65535 || remote_port < 0 || remote_port > 65535) {
+            linsys::push_error("connection::port", linsys::PARSE_ERROR);
+            continue;
+        }
+
+        Connection entry = {
+            .local_port = (int)local_port,
+            .remote_port = (int)remote_port,
+            .state = linsys::tcp_state(raw[3]),
+            .protocol = proto,
+        };
+
+        bool transferred = false;
+
+
+
+        {
+            defer if (!transferred) entry.free(allocator);
+
+            if (is_v6) {
+                entry.local_addr = linsys::ip_to_string_v6(
                     allocator,
                     linsys::parse_addr6(raw[1][:colon_l])
-                )
-                    : linsys::ip_to_string(allocator, linsys::parse_addr(raw[1][:colon_l])),
-                .remote_addr = is_v6 ? linsys::ip_to_string_v6(
+                );
+
+                entry.remote_addr = linsys::ip_to_string_v6(
                     allocator,
                     linsys::parse_addr6(raw[2][:colon_r])
-                )
-                    : linsys::ip_to_string(allocator, linsys::parse_addr(raw[2][:colon_r])),
-                .local_port = lp,
-                .remote_port = rp,
-                .state = linsys::tcp_state(raw[3]),
-                .protocol = proto,
+                );
+            } else {
+                entry.local_addr = linsys::ip_to_string(
+                    allocator,
+                    linsys::parse_addr(raw[1][:colon_l])
+                );
+
+                entry.remote_addr = linsys::ip_to_string(
+                    allocator,
+                    linsys::parse_addr(raw[2][:colon_r])
+                );
             }
-        );
+
+            out.push(entry);
+            transferred = true;
+        }
     }
 }
 
 <*
  @require pid > 0 : "pid must be positive"
 *>
-fn Connection[]? connections(Allocator allocator, int pid) {
+fn Connection[]? connections(Allocator allocator, int pid) => @pool() {
     ProcContext ctx = open_proc_context(pid)!;
     defer close_proc_context(ctx);
 
+    ulong[] inodes = socket_inodes(tmem, ctx)!;
+
+    io::printf("Socket inode count: %d\n", inodes.len);
+
+    foreach (inode : inodes) {
+        if (inode == 616368 || inode == 615071 || inode == 627345) {
+            io::printn(inode);
+        }
+    }
     List{Connection} list;
     list.init(allocator);
-    defer list.free();
 
-    read_connections(allocator, ctx, Protocol.TCP, &list)!;
-    read_connections(allocator, ctx, Protocol.UDP, &list)!;
-    read_connections(allocator, ctx, Protocol.TCP6, &list)!;
-    read_connections(allocator, ctx, Protocol.UDP6, &list)!;
+    bool transferred = false;
 
-    return list.to_array(allocator);
+    defer {
+        if (!transferred) {
+            foreach (entry : list) {
+                entry.free(allocator);
+            }
+        }
+
+        list.free();
+    }
+
+    if (inodes.len == 0) {
+        Connection[] result = list.to_array(allocator);
+        transferred = true;
+        return result;
+    }
+
+    read_connections(allocator, ctx, Protocol.TCP, inodes, &list)!;
+    read_connections(allocator, ctx, Protocol.UDP, inodes, &list)!;
+    read_connections(allocator, ctx, Protocol.TCP6, inodes, &list)!;
+    read_connections(allocator, ctx, Protocol.UDP6, inodes, &list)!;
+
+    Connection[] result = list.to_array(allocator);
+    transferred = true;
+
+    return result;
 }
 
 fn void Connection[].free(self, Allocator allocator) => linsys::free_slice(self, allocator);
@@ -892,7 +1054,7 @@ fn double? create_time(int pid) => @pool() {
 
     if (catch val) return linsys::PARSE_ERROR~;
 
-    ulong btime = system::boot_time();
+    ulong btime = system::boot_time()!;
     ulong clk   = system::clktck();
 
     if (clk == 0) return linsys::PARSE_ERROR~;
@@ -984,9 +1146,25 @@ fn ProcessPoller? poller(int pid) {
     };
 }
 
+fn double? cpu_percent_between(CpuSnapshot first, CpuSnapshot last) {
+    if (last.total_time <= first.total_time) return 0.0;
+
+    ulong clk = system::clktck();
+    if (clk == 0) return linsys::PARSE_ERROR~;
+
+    double proc_delta = last.proc_time - first.proc_time;
+    if (proc_delta < 0.0) return linsys::PROCESS_EXITED~;
+
+    double total_delta = (double)(last.total_time - first.total_time) / (double)clk;
+
+    return (proc_delta / total_delta) * 100.0;
+}
+
 fn double? ProcessPoller.cpu_percent(&self) {
-    double pct = cpu_percent_from(self.last_snapshot, self.pid)!;
-    self.last_snapshot = cpu_snapshot(self.pid)!;
+    CpuSnapshot current = cpu_snapshot(self.pid)!;
+    double pct          = cpu_percent_between(self.last_snapshot, current)!;
+    self.last_snapshot = current;
+
     return pct;
 }
 
@@ -1013,12 +1191,22 @@ fn CpuSnapshot? cpu_snapshot(int pid) {
  @require pid > 0 : "pid must be positive"
 *>
 fn double? cpu_percent_from(CpuSnapshot first, int pid) {
-    CpuTimes times     = cpu_times(pid)!;
-    ulong total2       = linsys::read_total_cpu_time()!;
-    double delta       = (times.user + times.system) - first.proc_time;
-    double total_delta = (double)(total2 - first.total_time);
-    if (total_delta <= 0) return 0.0;
-    return (delta / total_delta) * 100.0;
+    CpuTimes times = cpu_times(pid)!;
+    ulong total2   = linsys::read_total_cpu_time()!;
+
+    if (total2 <= first.total_time) return 0.0;
+
+    ulong clk = system::clktck();
+    if (clk == 0) return linsys::PARSE_ERROR~;
+
+    double proc_delta  = (times.user + times.system) - first.proc_time;
+    double total_delta = (double)(total2 - first.total_time) / (double)clk;
+
+    if (proc_delta < 0.0) {
+        return linsys::PROCESS_EXITED~;
+    }
+
+    return (proc_delta / total_delta) * 100.0;
 }
 
 <*
@@ -1133,27 +1321,37 @@ fn int[]? children(Allocator allocator, int pid, bool recursive = false) => @poo
 
     foreach (p : pid_list) {
         @pool() {
-            ProcContext ctx = open_proc_context(p)!!;
+            ProcContext? maybe_ctx = open_proc_context(p);
+            if (catch maybe_ctx) {
+                continue;
+            }
+
+            ProcContext ctx = maybe_ctx;
             defer close_proc_context(ctx);
 
-            CFile stream = open_proc_stream(ctx, "stat")!!;
+            CFile? maybe_stream = open_proc_stream(ctx, "stat");
+            if (catch maybe_stream) {
+                continue;
+            }
+
+            CFile stream = maybe_stream;
             defer (void)libc::fclose(stream);
 
-            String stat = linsys::read_proc_stream(tmem, stream)!!;
+            String? maybe_stat = linsys::read_proc_stream(tmem, stream);
+            if (catch maybe_stat) {
+                continue;
+            }
+
+            String stat = maybe_stat;
 
             sz? end_comm = stat.rindex_of(")");
-            if (catch end_comm) {
-                linsys::push_error("children::stat", linsys::PARSE_ERROR);
-                continue;
-            }
+            if (catch end_comm) continue;
 
-            String after    = stat[end_comm + 2..];
-            String[] fields = linsys::split_whitespace(after);
+            if (end_comm + 2 > stat.len) continue;
 
-            if (fields.len < 2) {
-                linsys::push_error("children::fields", linsys::PARSE_ERROR);
-                continue;
-            }
+            String[] fields = linsys::split_whitespace(stat[end_comm + 2..]);
+
+            if (fields.len < 2) continue;
 
             if (try int ppid = fields[1].to_int()) {
                 entries.push({ p, ppid });
@@ -1202,15 +1400,16 @@ fn int? parent(int pid) => @pool() {
  @require pid > 0 : "pid must be positive"
 *>
 fn int? nice_get(int pid) {
+    libc::errno_set((Errno)0);
+
     CInt p = libc::getpriority(libc::PRIO_PROCESS, pid);
-    if (libc::errno() != 0) {
-        switch (libc::errno()) {
-            case ESRCH: return linsys::NICE_NO_SUCH_PROCESS~;
-            case EPERM: return linsys::NICE_PERMISSION_DENIED~;
-            default: return linsys::NICE_INVALID~;
-        }
+
+    switch (libc::errno()) {
+        case ESRCH: return linsys::NICE_NO_SUCH_PROCESS~;
+        case EPERM:
+        case EACCES: return linsys::NICE_PERMISSION_DENIED~;
+        default: return linsys::NICE_INVALID~;
     }
-    return (int)p;
 }
 
 <*
@@ -1266,8 +1465,11 @@ fn int[]? cpu_affinity_get(Allocator allocator, int pid) {
 fn void? cpu_affinity_set(int pid, int[] cpus) {
     CpuSet cpu_set = { };
     foreach (cpu : cpus) {
+        if (cpu < 0 || cpu >= 1024) {
+            return linsys::SCHED_INVALID~;
+        }
+
         usz i = (usz)cpu;
-        if (i >= 1024) continue;
         cpu_set.bits[i / 64] |= (ulong)1 << (i % 64);
     }
 
@@ -1287,8 +1489,7 @@ fn RLimitEntry[]? rlimits_get(Allocator allocator, int pid) => @pool() {
     ProcContext ctx = open_proc_context(pid)!;
     defer close_proc_context(ctx);
 
-    ZString path  = string::tformat("/proc/%d/limits", pid).zstr_tcopy();
-    CFile? stream = open_proc_stream(ctx, path);
+    CFile stream = open_proc_stream(ctx, "limits")!;
     defer (void)libc::fclose(stream);
 
     String? lines = linsys::read_proc_stream(tmem, stream);
@@ -1539,35 +1740,36 @@ fn String? terminal(Allocator allocator, int pid) => @pool() {
 }
 
 struct MemoryFullInfo {
-    ulong rss;
-    ulong vms;
-    ulong shared;
-    ulong text;
-    ulong lib;
-    ulong data;
-    ulong dirty;
-    ulong uss;
-    ulong pss;
-    ulong swap;
+    ulong rss; // Resident memory in bytes
+    ulong vms; // Virtual memory size in bytes
+    ulong shared; // Approximate shared resident memory in bytes
+    ulong text; // Executable text size in bytes
+    ulong lib; // Unused; always zero
+    ulong data; // Data + stack in bytes
+    ulong dirty; // Unused; always zero
+    ulong uss; // Unique set size in bytes
+    ulong pss; // Proportional set size in bytes
+    ulong swap; // Swap usage in bytes
 }
 
 const _SC_PAGESIZE = 30; // TODO: VERIFY THIS
 
-fn ulong get_page_size() @private {
+fn ulong? get_page_size() @private {
     CLong page_size = os::posix::sysconf(_SC_PAGESIZE);
+    if (page_size <= 0) return linsys::IO_ERROR~;
     return (ulong)page_size;
 }
 
 fn String? read_vms_file(Allocator allocator, int pid) @private => @pool() {
     String path = string::tformat("/proc/%d/statm", pid);
-    File? file  = file::open(path, "r");
+    File file   = file::open(path, "r")!;
     defer (void)file.close();
-    if (catch file) return linsys::IO_ERROR~;
 
-    return linsys::read_file(file).copy(allocator).trim();
+    String content = linsys::read_file(file)!;
+    return content.trim().copy(allocator);
 }
 
-fn MemoryFullInfo? read_statm(MemoryFullInfo* mfi, ProcContext ctx) @private => @pool() {
+fn void? read_statm(MemoryFullInfo* mfi, ProcContext ctx) @private => @pool() {
     CFile stream = open_proc_stream(ctx, "statm")!;
     defer (void)libc::fclose(stream);
 
@@ -1576,60 +1778,70 @@ fn MemoryFullInfo? read_statm(MemoryFullInfo* mfi, ProcContext ctx) @private => 
 
     if (fields.len < 7) return linsys::PARSE_ERROR~;
 
-    if (fields.len < 7) return linsys::IO_ERROR~;
+    ulong page_size = get_page_size()!;
 
-    ulong page_size = get_page_size();
-
-    linsys::@try_field_append(
-        mfi.vms,
-        fields[0].to_ulong() * page_size,
-        "memory_full_info::Vms",
-        0
-    );
-
-    linsys::@try_field_append(
-        mfi.rss,
-        fields[1].to_ulong() * page_size,
-        "memory_full_info::Rss",
-        0
-    );
-
-    linsys::@try_field_append(
+    linsys::@try_field(mfi.vms, pages_to_bytes(fields[0], page_size), "memory_full_info::Vms", 0);
+    linsys::@try_field(mfi.rss, pages_to_bytes(fields[1], page_size), "memory_full_info::Rss", 0);
+    linsys::@try_field(
         mfi.shared,
-        fields[2].to_ulong() * page_size,
+        pages_to_bytes(fields[2], page_size),
         "memory_full_info::Shared",
         0
     );
+    linsys::@try_field(mfi.text, pages_to_bytes(fields[3], page_size), "memory_full_info::Text", 0);
+    linsys::@try_field(mfi.data, pages_to_bytes(fields[5], page_size), "memory_full_info::Data", 0);
+}
 
-    linsys::@try_field_append(
-        mfi.text,
-        fields[3].to_ulong() * page_size,
-        "memory_full_info::Text",
-        0
-    );
+fn ulong? kib_to_bytes(String value) @private {
+    ulong kib = value.to_ulong()!;
 
-    linsys::@try_field_append(
-        mfi.lib,
-        fields[4].to_ulong() * page_size,
-        "memory_full_info::Lib",
-        0
-    );
+    if (kib > ulong::max / 1024) {
+        return linsys::PARSE_ERROR~;
+    }
 
-    linsys::@try_field_append(
-        mfi.data,
-        fields[5].to_ulong() * page_size,
-        "memory_full_info::Data",
-        0
-    );
+    return kib * 1024;
+}
 
-    linsys::@try_field_append(
-        mfi.dirty,
-        fields[6].to_ulong() * page_size,
-        "memory_full_info::Dirty",
-        0
-    );
+fn ulong? pages_to_bytes(String value, ulong page_size) @private {
+    ulong pages = value.to_ulong()!;
 
-    return *mfi;
+    if (page_size == 0 || pages > ulong::max / page_size) {
+        return linsys::PARSE_ERROR~;
+    }
+
+    return pages * page_size;
+}
+
+fn void? parse_smaps_memory(MemoryFullInfo* mfi, String content) @private => @pool() {
+    foreach (line : content.tsplit("\n")) {
+        sz? idx = line.index_of_char(':');
+        if (catch idx) continue;
+        if (idx == -1) continue;
+
+        String key   = line[:idx].trim();
+        String value = line[idx + 1..].trim();
+
+        switch (key) {
+            case "Private_Clean":
+                linsys::@try_field_append(mfi.uss, kib_to_bytes(value.strip_suffix("kB")
+                    .trim()), "memory_full_info::UssPrivateClean", 0);
+
+            case "Private_Dirty":
+                linsys::@try_field_append(mfi.uss, kib_to_bytes(value.strip_suffix("kB")
+                    .trim()), "memory_full_info::UssPrivateDirty", 0);
+
+            case "Pss":
+                linsys::@try_field_append(mfi.pss, kib_to_bytes(value.strip_suffix("kB")
+                    .trim()), "memory_full_info::Pss", 0);
+
+            case "Swap":
+                linsys::@try_field_append(mfi.swap, kib_to_bytes(value.strip_suffix("kB")
+                    .trim()), "memory_full_info::Swap", 0);
+
+            default:
+                continue;
+        }
+    }
 }
 
 <*
@@ -1640,61 +1852,27 @@ fn MemoryFullInfo? memory_full_info(int pid) => @pool() {
     defer close_proc_context(ctx);
 
     MemoryFullInfo mfi = { };
+
     read_statm(&mfi, ctx)!;
 
-    CFile stream = open_proc_stream(ctx, "smaps")!;
+    CFile? stream = open_proc_stream(ctx, "smaps_rollup");
+
+    if (catch stream) {
+        stream = open_proc_stream(ctx, "smaps")!;
+    }
+
     defer (void)libc::fclose(stream);
 
     String content = linsys::read_proc_stream(tmem, stream)!;
 
-    foreach (line : content.tsplit("\n")) {
-        sz? idx = line.index_of_char(':');
-        if (catch idx) continue;
-
-        String key   = line[:idx].trim();
-        String value = line[idx + 1..].trim_right("kB").trim();
-
-        switch (key) {
-            case "Private_Clean":
-                linsys::@try_field_append(
-                    mfi.uss,
-                    value.to_ulong() * 1024,
-                    "memory_full_info::Uss",
-                    0
-                );
-
-            case "Private_Dirty":
-                linsys::@try_field_append(
-                    mfi.uss,
-                    value.to_ulong() * 1024,
-                    "memory_full_info::Uss",
-                    0
-                );
-
-            case "Pss":
-                linsys::@try_field_append(
-                    mfi.pss,
-                    value.to_ulong() * 1024,
-                    "memory_full_info::Pss",
-                    0
-                );
-
-            case "Swap":
-                linsys::@try_field_append(
-                    mfi.swap,
-                    value.to_ulong() * 1024,
-                    "memory_full_info::Swap",
-                    0
-                );
-        }
-    }
+    parse_smaps_memory(&mfi, content)!;
 
     return mfi;
 }
 
 struct PageFault {
-    int minor;
-    int major;
+    ulong minor;
+    ulong major;
 }
 
 <*
@@ -1713,15 +1891,15 @@ fn PageFault? page_fault(int pid) => @pool() {
     if (fields.len <= 9) return linsys::PARSE_ERROR~;
 
     PageFault pf = { };
-    linsys::@try_field(pf.minor, fields[7].to_int(), "page_fault::minor", 0);
-    linsys::@try_field(pf.major, fields[9].to_int(), "page_fault::major", 0);
+    linsys::@try_field(pf.minor, fields[7].to_ulong(), "page_fault::minor", 0);
+    linsys::@try_field(pf.major, fields[9].to_ulong(), "page_fault::major", 0);
 
     return pf;
 }
 
 struct CtxSwitches {
-    int voluntary;
-    int involuntary;
+    ulong voluntary;
+    ulong involuntary;
 }
 
 <*
@@ -1748,7 +1926,7 @@ fn CtxSwitches? ctx_switches(int pid) => @pool() {
             case "voluntary_ctxt_switches":
                 linsys::@try_field_append(
                     switches.voluntary,
-                    value.to_int(),
+                    value.to_ulong(),
                     "ctx_switches::voluntary",
                     0
                 );
@@ -1756,7 +1934,7 @@ fn CtxSwitches? ctx_switches(int pid) => @pool() {
             case "nonvoluntary_ctxt_switches":
                 linsys::@try_field_append(
                     switches.involuntary,
-                    value.to_int(),
+                    value.to_ulong(),
                     "ctx_switches::involuntary",
                     0
                 );
