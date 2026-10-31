@@ -191,10 +191,7 @@ fn void test_diskusage() @test {
 
 fn void test_io_counters() @test {
     @tracker(; Allocator alloc) {
-        DiskContext d = { };
-        d.init(alloc);
-        DiskIoCounters[]? counters = disk::io_counters(alloc, &d);
-        d.free();
+        DiskIoCounters[]? counters = disk::io_counters(alloc);
         if (catch counters) return;
         counters.free(alloc);
     };
@@ -202,48 +199,28 @@ fn void test_io_counters() @test {
 
 fn void test_io_poller() @test {
     @tracker(; Allocator alloc) {
-        DiskContext d = { };
-        d.init(alloc);
-        DiskIoPoller poller = disk::poller(alloc, &d)!!;
+        DiskIoPoller poller = disk::poller(alloc)!!;
         poller.close();
-        d.free();
     };
 }
 
 fn void test_io_poller_poll() @test {
     @tracker(; Allocator alloc) {
-        DiskContext d = { };
-        d.init(alloc);
-        DiskIoPoller poller = disk::poller(alloc, &d)!!;
+        DiskIoPoller poller = disk::poller(alloc)!!;
         poller.@poll(; DiskIoCounters[] disks) {
             assert(disks.len >= 0);
         }!!;
         poller.close();
-        d.free();
     };
 }
 
 fn void test_disk_io_poller_perdisk() @test {
     @tracker(; Allocator alloc) {
-        disk::DiskContext d = { };
-        d.init(alloc);
-        DiskIoPoller poller = disk::poller(alloc, &d)!!;
+        DiskIoPoller poller = disk::poller(alloc)!!;
         if (catch poller.@poll_perdisk("sda" ; DiskIoCounters dio) {
         }) {
         }
         poller.close();
-        d.free();
-    };
-}
-
-fn void test_disk_context() @test {
-    @tracker(; Allocator alloc) {
-        disk::DiskContext ctx;
-        ctx.init(alloc);
-        usz? s = ctx.sector_size("nvme0n1p2");
-        ctx.free();
-        if (catch s) return;
-        assert(s > 0);
     };
 }
 

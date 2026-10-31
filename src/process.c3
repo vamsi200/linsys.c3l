@@ -173,10 +173,11 @@ fn ProcessInfo? info(Allocator allocator, int pid) => @pool() {
     CFile stream = open_proc_stream(ctx, "status")!;
     defer (void)libc::fclose(stream);
 
-    char[4096] buf;
-
     ProcessInfo proc = { };
-    Process p        = { };
+    bool completed   = false;
+    defer if (!completed) proc.free(allocator);
+    Process p = { .pid = pid };
+    defer if (!completed) p.free(allocator);
 
     String? lines = linsys::read_proc_stream(tmem, stream);
     if (catch lines) return linsys::IO_ERROR~;
@@ -186,24 +187,23 @@ fn ProcessInfo? info(Allocator allocator, int pid) => @pool() {
         if (catch idx) continue;
         if (idx == -1) continue;
 
-        String key   = line[:idx].trim();
-        String data  = line[idx + 1..].trim();
-        String first = data.trim();
+        String key  = line[:idx].trim();
+        String data = line[idx + 1..].trim();
 
         switch (key) {
             case "Threads":
                 linsys::@try_field(proc.threads, data.to_int(), "processinfo::threads", 0);
 
             case "Uid":
-                if (try long uid_idx = first.index_of_char('\t')) {
-                    first = uid_idx == -1 ? first : first[:uid_idx];
-                    linsys::@try_field(proc.uid, first.to_int(), "processinfo::uid", 0);
+                String[] values = linsys::split_whitespace(data);
+                if (values.len > 0) {
+                    linsys::@try_field(proc.uid, values[0].to_int(), "processinfo::uid", 0);
                 }
 
             case "Gid":
-                if (try long gid_idx = first.index_of_char('\t')) {
-                    first = gid_idx == -1 ? first : first[:gid_idx];
-                    linsys::@try_field(proc.gid, first.to_int(), "processinfo::gid", 0);
+                String[] values = linsys::split_whitespace(data);
+                if (values.len > 0) {
+                    linsys::@try_field(proc.gid, values[0].to_int(), "processinfo::gid", 0);
                 }
 
             case "Pid":
@@ -213,18 +213,29 @@ fn ProcessInfo? info(Allocator allocator, int pid) => @pool() {
                 linsys::@try_field(p.ppid, data.to_int(), "processinfo::ppid", 0);
 
             case "Name":
+                if (p.name.len > 0) mem::alloc::free(allocator, p.name);
                 p.name = data.copy(allocator);
 
             case "VmSize":
-                if (try long vms_idx = first.index_of_char(' ')) {
-                    first = vms_idx == -1 ? first : first[:vms_idx];
-                    linsys::@try_field(proc.vm_size, first.to_ulong(), "processinfo::vmsize", 0);
+                String[] values = linsys::split_whitespace(data);
+                if (values.len > 0) {
+                    linsys::@try_field(
+                        proc.vm_size,
+                        kib_to_bytes(values[0]),
+                        "processinfo::vmsize",
+                        0
+                    );
                 }
 
             case "VmRSS":
-                if (try long vmrss_idx = first.index_of_char(' ')) {
-                    first = vmrss_idx == -1 ? first : first[:vmrss_idx];
-                    linsys::@try_field(proc.vm_rss, first.to_ulong(), "processinfo::vmrss", 0);
+                String[] values = linsys::split_whitespace(data);
+                if (values.len > 0) {
+                    linsys::@try_field(
+                        proc.vm_rss,
+                        kib_to_bytes(values[0]),
+                        "processinfo::vmrss",
+                        0
+                    );
                 }
 
             case "State":
@@ -255,8 +266,7 @@ fn ProcessInfo? info(Allocator allocator, int pid) => @pool() {
     );
 
     proc.process = p;
-
-
+    completed = true;
     return proc;
 }
 
@@ -283,7 +293,9 @@ fn ProcState proc_state(char c) @private {
 }
 
 fn Process? proc_helper(Allocator allocator, ProcContext ctx) @private => @pool() {
-    Process p = { };
+    Process p      = { };
+    bool completed = false;
+    defer if (!completed) p.free(allocator);
 
     CFile stream = open_proc_stream(ctx, "status")!;
     defer (void)libc::fclose(stream);
@@ -311,6 +323,7 @@ fn Process? proc_helper(Allocator allocator, ProcContext ctx) @private => @pool(
                 linsys::@try_field(p.ppid, data.to_int(), "process::ppid", 0);
 
             case "Name":
+                if (p.name.len > 0) mem::alloc::free(allocator, p.name);
                 p.name = data.copy(allocator);
 
             case "State":
@@ -324,10 +337,10 @@ fn Process? proc_helper(Allocator allocator, ProcContext ctx) @private => @pool(
     }
 
     if (libc::ferror(stream) != 0) {
-        p.free(allocator);
         return linsys::IO_ERROR~;
     }
 
+    completed = true;
     return p;
 }
 
@@ -413,7 +426,11 @@ fn String? readlink_alloc(Allocator allocator, ZString path) @private {
         }
 
         if ((usz)n < (ulong)capacity) {
-            return (String)buf[0..(usz)n];
+            if (n == 0) {
+                mem::alloc::free(allocator, buf);
+                return "".copy(allocator);
+            }
+            return (String)buf[0..(usz)n - 1];
         }
 
         mem::alloc::free(allocator, buf);
@@ -432,7 +449,8 @@ fn String? read_exe_helper(Allocator allocator, ProcContext ctx) @private {
     char[4096] buf;
 
     sz n = readlinkat(ctx.dirfd, "exe", &buf, 4096);
-    if (n < 0) return linsys::IO_ERROR~;
+    if (n < 0) return linsys::errno_to_fault()~;
+    if (n >= 4096) return linsys::IO_ERROR~;
 
     return ((String)buf[:(usz)n]).copy(allocator);
 }
@@ -451,6 +469,7 @@ fn int[]? list_pids(Allocator allocator) => @pool() {
     List{int} pids;
 
     pids.init(allocator);
+    defer pids.free();
     Path p        = io::path::new(tmem, "/proc")!;
     PathList list = io::path::ls(tmem, p)!;
     foreach (l : list) {
@@ -458,7 +477,6 @@ fn int[]? list_pids(Allocator allocator) => @pool() {
             pids.push(pid);
         }
     }
-    defer pids.free();
     return pids.to_array(allocator);
 }
 
@@ -505,7 +523,11 @@ fn EnvVar[]? environ(Allocator allocator, int pid) => @pool() {
 
     List{EnvVar} ev;
     ev.init(allocator);
-    defer ev.free();
+    bool transferred = false;
+    defer {
+        if (!transferred) foreach (item : ev) item.free(allocator);
+        ev.free();
+    }
 
     foreach (line : content.split(tmem, "\0")) {
         long? idx = line.index_of_char('=');
@@ -514,7 +536,9 @@ fn EnvVar[]? environ(Allocator allocator, int pid) => @pool() {
         ev.push({ .key = line[:idx].copy(allocator), .value = line[idx + 1..].copy(allocator) });
     }
 
-    return ev.to_array(allocator);
+    EnvVar[] output = ev.to_array(allocator);
+    transferred = true;
+    return output;
 }
 
 fn void EnvVar[].free(self, Allocator allocator) => linsys::free_slice(self, allocator);
@@ -548,6 +572,11 @@ fn String? environ_get(Allocator allocator, int pid, String key) => @pool() {
 fn String[]? fd_paths(Allocator allocator, int pid) => @pool() {
     List{String} fds;
     fds.init(allocator);
+    bool transferred = false;
+    defer {
+        if (!transferred) foreach (item : fds) mem::alloc::free(allocator, item);
+        fds.free();
+    }
 
     String proc_fd = string::tformat("/proc/%d/fd", pid);
     Path path      = path::new(tmem, proc_fd)!;
@@ -560,8 +589,9 @@ fn String[]? fd_paths(Allocator allocator, int pid) => @pool() {
         }
     }
 
-    defer fds.free();
-    return fds.to_array(allocator);
+    String[] output = fds.to_array(allocator);
+    transferred = true;
+    return output;
 }
 
 extern fn void* fdopendir(CInt fd) @private;
@@ -618,7 +648,11 @@ fn MemoryMap[]? maps(Allocator allocator, int pid) => @pool() {
 
     List{MemoryMap} mm;
     mm.init(allocator);
-    defer mm.free();
+    bool transferred = false;
+    defer {
+        if (!transferred) foreach (item : mm) item.free(allocator);
+        mm.free();
+    }
 
     foreach (line : content.split(tmem, "\n")) {
         if (line.len == 0) continue;
@@ -630,13 +664,18 @@ fn MemoryMap[]? maps(Allocator allocator, int pid) => @pool() {
             continue;
         }
 
+        if (split[1].len < 4) {
+            linsys::push_error("memorymap::perms", linsys::PARSE_ERROR);
+            continue;
+        }
+
         MemoryMap entry = { };
 
         entry.address_range = split[0].copy(allocator);
         mem::copy(&entry.perms, split[1].ptr, math::min(split[1].len, entry.perms.len));
         mem::copy(&entry.device, split[3].ptr, math::min(split[3].len, entry.device.len));
 
-        linsys::@try_field(entry.offset, split[2].to_long(), "memorymap::offset", 0);
+        linsys::@try_field(entry.offset, split[2].to_long(16), "memorymap::offset", 0);
         linsys::@try_field(entry.inode, split[4].to_long(), "memorymap::inode", 0);
 
         if (split.len > 5) {
@@ -646,7 +685,9 @@ fn MemoryMap[]? maps(Allocator allocator, int pid) => @pool() {
         mm.push(entry);
     }
 
-    return mm.to_array(allocator);
+    MemoryMap[] output = mm.to_array(allocator);
+    transferred = true;
+    return output;
 }
 
 fn void MemoryMap.free(self, Allocator allocator) => linsys::free_fields(self, allocator);
@@ -675,7 +716,6 @@ fn String flags_to_mode(int flags, Allocator allocator) @private => @pool() {
         { 0o040000, "direct" }, // O_DIRECT
         { 0o100000, "largefile" }, // O_LARGEFILE
         { 0o1000000, "noatime" }, // O_NOATIME
-        { 0o2000000, "cloexec" }, // O_CLOEXEC
     };
 
     DString result = dstring::new_with_capacity(tmem, 32);
@@ -707,6 +747,10 @@ fn String? readlinkat_alloc(Allocator allocator, CInt dirfd, ZString path) @priv
         }
 
         if ((usz)n < (ulong)capacity) {
+            if (n == 0) {
+                mem::alloc::free(allocator, buf);
+                return "".copy(allocator);
+            }
             String result = (String)buf[0..(usz)n - 1];
             return result;
         }
@@ -730,7 +774,11 @@ fn OpenFile[]? open_files(Allocator allocator, int pid) => @pool() {
 
     List{OpenFile} of;
     of.init(allocator);
-    defer of.free();
+    bool all_transferred = false;
+    defer {
+        if (!all_transferred) foreach (item : of) item.free(allocator);
+        of.free();
+    }
 
     int[] fd_list = fds_helper(tmem, ctx)!;
 
@@ -795,7 +843,9 @@ fn OpenFile[]? open_files(Allocator allocator, int pid) => @pool() {
         }
     }
 
-    return of.to_array(allocator);
+    OpenFile[] output = of.to_array(allocator);
+    all_transferred = true;
+    return output;
 }
 
 
@@ -815,7 +865,7 @@ fn ulong[]? socket_inodes(Allocator allocator, ProcContext ctx) @private => @poo
 
             String? target = readlinkat_alloc(allocator, ctx.dirfd, fd_name.zstr_tcopy());
             if (catch err = target) {
-                io::printf("Failed to read fd %d\n", fd);
+                linsys::push_error("connection::fd_link", err);
                 continue;
             }
 
@@ -842,7 +892,6 @@ fn ulong[]? socket_inodes(Allocator allocator, ProcContext ctx) @private => @poo
 
                 if (!exists) inodes.push(inode);
             } else {
-                io::printn("Parse Failed..");
                 linsys::push_error("connection::socket_inode", linsys::PARSE_ERROR);
             }
         };
@@ -995,13 +1044,6 @@ fn Connection[]? connections(Allocator allocator, int pid) => @pool() {
 
     ulong[] inodes = socket_inodes(tmem, ctx)!;
 
-    io::printf("Socket inode count: %d\n", inodes.len);
-
-    foreach (inode : inodes) {
-        if (inode == 616368 || inode == 615071 || inode == 627345) {
-            io::printn(inode);
-        }
-    }
     List{Connection} list;
     list.init(allocator);
 
@@ -1023,10 +1065,18 @@ fn Connection[]? connections(Allocator allocator, int pid) => @pool() {
         return result;
     }
 
-    read_connections(allocator, ctx, Protocol.TCP, inodes, &list)!;
-    read_connections(allocator, ctx, Protocol.UDP, inodes, &list)!;
-    read_connections(allocator, ctx, Protocol.TCP6, inodes, &list)!;
-    read_connections(allocator, ctx, Protocol.UDP6, inodes, &list)!;
+    if (catch err = read_connections(allocator, ctx, Protocol.TCP, inodes, &list)) {
+        linsys::push_error("connections::tcp", err);
+    }
+    if (catch err = read_connections(allocator, ctx, Protocol.UDP, inodes, &list)) {
+        linsys::push_error("connections::udp", err);
+    }
+    if (catch err = read_connections(allocator, ctx, Protocol.TCP6, inodes, &list)) {
+        linsys::push_error("connections::tcp6", err);
+    }
+    if (catch err = read_connections(allocator, ctx, Protocol.UDP6, inodes, &list)) {
+        linsys::push_error("connections::udp6", err);
+    }
 
     Connection[] result = list.to_array(allocator);
     transferred = true;
@@ -1065,6 +1115,7 @@ fn double? create_time(int pid) => @pool() {
 fn String[]? parse_proc_stat_fields(Allocator allocator, String raw) @private => @pool() {
     sz rp = raw.rindex_of(")")!;
 
+    if (rp + 2 >= raw.len || raw[rp + 1] != ' ') return linsys::PARSE_ERROR~;
     String after = raw[(rp + 2)..];
 
     String[] raw_fields = linsys::split_whitespace(after);
@@ -1089,8 +1140,11 @@ fn CpuTimes? cpu_times_parse(String path) @private => @pool() {
     String raw      = linsys::read_file(file)!;
     String[] fields = parse_proc_stat_fields(tmem, raw)!;
 
-    if (fields.len > 14) {
+    if (fields.len < 15) return linsys::PARSE_ERROR~;
+
+    {
         double clk = system::clktck();
+        if (clk <= 0.0) return linsys::PARSE_ERROR~;
 
         if (try double utime = fields[11].to_double()) {
             cpu.user = utime / clk;
@@ -1215,23 +1269,24 @@ fn double? cpu_percent_from(CpuSnapshot first, int pid) {
 *>
 fn double? cpu_percent(int pid, double interval) {
     CpuSnapshot snap = cpu_snapshot(pid)!;
-    thread::sleep_ms((long)(interval * 1000));
+    if (interval > (double)long::max / 1000.0) return linsys::INVALID_ARGUMENT~;
+    thread::sleep_ms((long)(interval * 1000.0));
     return cpu_percent_from(snap, pid);
 }
 
 fn ulong? parse_proc_ulong(String path, String key) @private => @pool() {
-    ulong result = 0;
-    File file    = file::open(path, "r")!;
+    File file = file::open(path, "r")!;
     defer (void)file.close();
 
     while (try line = io::treadline(&file)) {
-        if (!line.starts_with(key)) continue;
-        String[] s = line.trim().split(tmem, ":");
-        if (s.len < 2) continue;
-        if (try ulong v = s[1].trim().strip_suffix(" kB").to_ulong()) result = v;
-        break;
+        sz? idx = line.index_of_char(':');
+        if (catch idx) continue;
+        if (line[:idx].trim() != key) continue;
+        String[] fields = linsys::split_whitespace(line[idx + 1..].trim());
+        if (fields.len == 0) return linsys::PARSE_ERROR~;
+        return fields[0].to_ulong();
     }
-    return result;
+    return linsys::NOT_FOUND~;
 }
 
 <*
@@ -1401,10 +1456,11 @@ fn int? parent(int pid) => @pool() {
 *>
 fn int? nice_get(int pid) {
     libc::errno_set((Errno)0);
+    CInt p    = libc::getpriority(libc::PRIO_PROCESS, pid);
+    Errno err = libc::errno();
+    if (err == (Errno)0) return (int)p;
 
-    CInt p = libc::getpriority(libc::PRIO_PROCESS, pid);
-
-    switch (libc::errno()) {
+    switch (err) {
         case ESRCH: return linsys::NICE_NO_SUCH_PROCESS~;
         case EPERM:
         case EACCES: return linsys::NICE_PERMISSION_DENIED~;
@@ -1499,45 +1555,35 @@ fn RLimitEntry[]? rlimits_get(Allocator allocator, int pid) => @pool() {
     entries.init(allocator);
     defer entries.free();
 
+    bool transferred = false;
+    defer if (!transferred) foreach (item : entries) item.free(allocator);
     int i = 0;
-
     foreach (line : lines.tsplit("\n")) {
-        if (i++ == 0 || line.len == 0) continue;
-        String[] parts = linsys::split_whitespace(line.trim());
-        int pc         = 0;
-        String[4] filtered;
-
-        foreach (p : parts) {
-            String t = p.trim();
-            if (t.len > 0) filtered[pc++] = t;
-            if (pc == 4) break;
-        }
-
-        if (pc < 3) {
+        if (i++ == 0 || line.trim().len == 0) continue;
+        if (line.len < 65) {
             linsys::push_error("rlimitentry::line", linsys::PARSE_ERROR);
             continue;
         }
-
-        ulong soft;
-        ulong hard;
-
-        if (filtered[1] == "unlimited") {
+        String name     = line[0:25].trim();
+        String soft_str = line[25:20].trim();
+        String hard_str = line[45:20].trim();
+        ulong soft      = 0;
+        ulong hard      = 0;
+        if (soft_str == "unlimited") {
             soft = ulong::max;
         } else {
-            linsys::@try_field(soft, filtered[1].to_ulong(), "limit::soft", 0);
+            linsys::@try_field(soft, soft_str.to_ulong(), "limit::soft", 0);
         }
-        if (filtered[2] == "unlimited") {
+        if (hard_str == "unlimited") {
             hard = ulong::max;
         } else {
-            linsys::@try_field(hard, filtered[2].to_ulong(), "limit::hard", 0);
+            linsys::@try_field(hard, hard_str.to_ulong(), "limit::hard", 0);
         }
-
-        entries.push(
-            { .name = filtered[0].copy(allocator), .limit = { .soft = soft, .hard = hard } }
-        );
+        entries.push({ .name = name.copy(allocator), .limit = { .soft = soft, .hard = hard } });
     }
-
-    return entries.to_array(allocator);
+    RLimitEntry[] output = entries.to_array(allocator);
+    transferred = true;
+    return output;
 }
 
 fn void RLimitEntry[].free(self, Allocator allocator) => linsys::free_slice(self, allocator);
@@ -1597,14 +1643,20 @@ fn Process[]? all_processes(Allocator allocator) => @pool() {
     int[] pids = list_pids(tmem)!;
     List{Process} result;
     result.init(allocator);
-    defer result.free();
+    bool transferred = false;
+    defer {
+        if (!transferred) foreach (item : result) item.free(allocator);
+        result.free();
+    }
 
     foreach (pid : pids) {
         if (try Process p = proc(allocator, pid)) {
             result.push(p);
         }
     }
-    return result.to_array(allocator);
+    Process[] output = result.to_array(allocator);
+    transferred = true;
+    return output;
 }
 
 <*
@@ -1614,7 +1666,11 @@ fn Process[]? find_by_name(Allocator allocator, String name) => @pool() {
     int[] pids = list_pids(tmem)!;
     List{Process} result;
     result.init(allocator);
-    defer result.free();
+    bool transferred = false;
+    defer {
+        if (!transferred) foreach (item : result) item.free(allocator);
+        result.free();
+    }
 
     foreach (pid : pids) {
         if (try Process p = proc(allocator, pid)) {
@@ -1625,7 +1681,9 @@ fn Process[]? find_by_name(Allocator allocator, String name) => @pool() {
             }
         }
     }
-    return result.to_array(allocator);
+    Process[] output = result.to_array(allocator);
+    transferred = true;
+    return output;
 }
 
 struct Passwd {
@@ -1752,13 +1810,6 @@ struct MemoryFullInfo {
     ulong swap; // Swap usage in bytes
 }
 
-const _SC_PAGESIZE = 30; // TODO: VERIFY THIS
-
-fn ulong? get_page_size() @private {
-    CLong page_size = os::posix::sysconf(_SC_PAGESIZE);
-    if (page_size <= 0) return linsys::IO_ERROR~;
-    return (ulong)page_size;
-}
 
 fn String? read_vms_file(Allocator allocator, int pid) @private => @pool() {
     String path = string::tformat("/proc/%d/statm", pid);
@@ -1778,7 +1829,7 @@ fn void? read_statm(MemoryFullInfo* mfi, ProcContext ctx) @private => @pool() {
 
     if (fields.len < 7) return linsys::PARSE_ERROR~;
 
-    ulong page_size = get_page_size()!;
+    ulong page_size = system::get_page_size()!;
 
     linsys::@try_field(mfi.vms, pages_to_bytes(fields[0], page_size), "memory_full_info::Vms", 0);
     linsys::@try_field(mfi.rss, pages_to_bytes(fields[1], page_size), "memory_full_info::Rss", 0);
@@ -1974,7 +2025,7 @@ fn ProcessCgroup? cgroup(Allocator allocator, int pid) => @pool() {
 
         if (cgroup_path.len == 0) continue;
 
-        ProcessCgroup result;
+        ProcessCgroup result = { };
         result.controllers = controller.copy(allocator);
         result.path = cgroup_path.copy(allocator);
 
@@ -1988,7 +2039,7 @@ fn ProcessCgroup? cgroup(Allocator allocator, int pid) => @pool() {
         return result;
     }
 
-    return linsys::IO_ERROR~;
+    return linsys::NOT_FOUND~;
 }
 
 struct Namespace {
@@ -2024,12 +2075,13 @@ fn Namespace? namespace_helper(ProcContext ctx, NamespaceType type) @private => 
     String path   = string::tformat("ns/%s", name);
     String target = readlinkat_alloc(tmem, ctx.dirfd, path.zstr_tcopy())!;
 
-    sz start = target.index_of_char('[')!;
-    sz end   = target.index_of_char(']')!;
-
+    sz? start = target.index_of_char('[');
+    sz? end   = target.index_of_char(']');
+    if (catch start) return linsys::PARSE_ERROR~;
+    if (catch end) return linsys::PARSE_ERROR~;
     if (end <= start + 1) return linsys::PARSE_ERROR~;
 
-    ulong inode = target[start + 1..end].to_ulong()!;
+    ulong inode = target[start + 1..end - 1].to_ulong()!;
 
     return { .type = type, .inode = inode };
 }
@@ -2099,10 +2151,10 @@ extern fn int sched_rr_get_interval(int pid, Timespec* interval);
 
 fn SchedulingInfo? scheduling(int pid) => @pool() {
     int policy = sched_getscheduler(pid);
-    if (policy < 0) return linsys::IO_ERROR~;
+    if (policy < 0) return linsys::errno_to_fault()~;
 
     SchedParam param;
-    if (sched_getparam(pid, &param) != 0) return linsys::IO_ERROR~;
+    if (sched_getparam(pid, &param) != 0) return linsys::errno_to_fault()~;
 
     SchedulingInfo result;
     result.policy = (SchedulingPolicy)policy;
@@ -2120,7 +2172,7 @@ fn void? set_scheduling(int pid, SchedulingPolicy policy, int priority) => @pool
     param.sched_priority = priority;
 
     if (sched_setscheduler(pid, (int)policy, &param) != 0) {
-        return linsys::IO_ERROR~;
+        return linsys::errno_to_fault()~;
     }
 }
 
@@ -2131,10 +2183,10 @@ struct PriorityRange {
 
 fn PriorityRange? priority_range(SchedulingPolicy policy) => @pool() {
     int min = sched_get_priority_min((int)policy);
-    if (min < 0) return linsys::IO_ERROR~;
+    if (min < 0) return linsys::errno_to_fault()~;
 
     int max = sched_get_priority_max((int)policy);
-    if (max < 0) return linsys::IO_ERROR~;
+    if (max < 0) return linsys::errno_to_fault()~;
 
     PriorityRange result;
     result.min = min;
@@ -2147,13 +2199,13 @@ fn void? set_priority(int pid, int priority) => @pool() {
     SchedParam param;
     param.sched_priority = priority;
 
-    if (sched_setparam(pid, &param) != 0) return linsys::IO_ERROR~;
+    if (sched_setparam(pid, &param) != 0) return linsys::errno_to_fault()~;
 }
 
 fn Timespec? rr_interval(int pid) => @pool() {
     Timespec interval;
 
-    if (sched_rr_get_interval(pid, &interval) != 0) return linsys::IO_ERROR~;
+    if (sched_rr_get_interval(pid, &interval) != 0) return linsys::errno_to_fault()~;
 
     return interval;
 }
