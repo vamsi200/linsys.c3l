@@ -21,6 +21,9 @@
   "sources": [
     "src/**"
   ],
+  "c-sources": [
+    "src/statvfs_wrapper.c"
+  ],
   // Test sources compiled for all targets.
   "test-sources": [
     "test/**"
