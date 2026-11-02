@@ -22,6 +22,7 @@ struct SensorBattery {
     double energy_full;
     double power_now;
     long secs_left;
+    bool power_plugged;
 }
 
 enum BatteryStatus {
@@ -389,17 +390,37 @@ fn FanPoller? fan_poller(Allocator allocator) {
     };
 }
 
-
 fn void FanPoller.close(&self) {
-    self.list.free();
     self.paths.free(self.allocator);
+    foreach (fan : self.list) {
+        fan.free(self.allocator);
+    }
+    self.list.free();
 }
 
 
 macro void? FanPoller.@poll(&self; @body(fp)) {
-    self.list.clear();
-    parse_sensor_fans(self.allocator, self.paths, &self.list, false)!;
-    return @body(self.list.array_view());
+    List{SensorFan} next;
+    next.init(self.allocator);
+
+    bool transferred = false;
+    defer {
+        if (!transferred) {
+            foreach (fan : next) fan.free(self.allocator);
+            next.free();
+        }
+    }
+
+    parse_sensor_fans(self.allocator, self.paths, &next, true)!;
+
+    List{SensorFan} previous = self.list;
+    self.list = next;
+    transferred = true;
+
+    foreach (fan : previous) fan.free(self.allocator);
+    previous.free();
+
+    @body(self.list.array_view());
 }
 
 fn SensorBattery[]? batteries(Allocator allocator) => @pool() {
@@ -493,29 +514,49 @@ fn SensorBattery[]? batteries(Allocator allocator) => @pool() {
         bat.energy_full = (double)energy_full / 1000000.0;
         bat.power_now = (double)power_now / 1000000.0;
 
-        if (bat.status == BatteryStatus.DISCHARGING) {
+        bat.power_plugged = (bat.status == BatteryStatus.CHARGING
+            || bat.status == BatteryStatus.FULL
+            || bat.status == BatteryStatus.NOT_CHARGING);
+
+        bat.secs_left = -1;
+
+        if (bat.status == BatteryStatus.DISCHARGING || bat.status == BatteryStatus.CHARGING) {
+            ulong charge_now  = 0;
+            ulong current_now = 0;
+            ulong charge_full = 0;
+
+            linsys::@try_field(
+                charge_now,
+                linsys::read_ulong_file(string::tformat("%s/charge_now", base)),
+                "sensor_battery::charge_now",
+                0
+            );
+            linsys::@try_field(
+                current_now,
+                linsys::read_ulong_file(string::tformat("%s/current_now", base)),
+                "sensor_battery::current_now",
+                0
+            );
+            linsys::@try_field(
+                charge_full,
+                linsys::read_ulong_file(string::tformat("%s/charge_full", base)),
+                "sensor_battery::charge_full",
+                0
+            );
+
             if (bat.power_now > 0.0) {
-                bat.secs_left = (long)(bat.energy_now / bat.power_now * 3600.0);
-            } else {
-                ulong charge_now  = 0;
-                ulong current_now = 0;
-
-                linsys::@try_field(
-                    charge_now,
-                    linsys::read_ulong_file(string::tformat("%s/charge_now", base)),
-                    "sensor_battery::charge_now",
-                    0
-                );
-
-                linsys::@try_field(
-                    current_now,
-                    linsys::read_ulong_file(string::tformat("%s/current_now", base)),
-                    "sensor_battery::current_now",
-                    0
-                );
-
-                if (current_now > 0) {
+                if (bat.status == BatteryStatus.DISCHARGING) {
+                    bat.secs_left = (long)(bat.energy_now / bat.power_now * 3600.0);
+                } else {
+                    bat.secs_left = (long)((bat.energy_full - bat.energy_now) / bat.power_now
+                        * 3600.0);
+                }
+            } else if (current_now > 0) {
+                if (bat.status == BatteryStatus.DISCHARGING) {
                     bat.secs_left = (long)((double)charge_now / (double)current_now * 3600.0);
+                } else if (charge_full > charge_now) {
+                    bat.secs_left = (long)((double)(charge_full - charge_now) / (double)current_now
+                        * 3600.0);
                 }
             }
         }
@@ -530,3 +571,156 @@ fn SensorBattery[]? batteries(Allocator allocator) => @pool() {
 
 fn void SensorBattery[].free(self, Allocator allocator) => linsys::free_slice(self, allocator);
 fn void SensorBattery.free(self, Allocator allocator) => linsys::free_fields(self, allocator);
+
+struct SensorPower {
+    String name;
+    double current_watts;
+}
+
+fn SensorPower[]? power(Allocator allocator) => @pool() {
+    List{SensorPower} out;
+    out.init(allocator);
+    bool transferred = false;
+
+    defer {
+        if (!transferred) {
+            foreach (p : out) linsys::free_fields(p, allocator);
+        }
+        out.free();
+    }
+
+    if (try PathList hwmon_entries = io::path::ls(tmem, path::new(tmem, "/sys/class/hwmon")!)) {
+        foreach (entry : hwmon_entries) {
+            String hwmon = entry.file_tbasename()!;
+            String base  = string::tformat("/sys/class/hwmon/%s", hwmon);
+
+            String sensor_name = hwmon;
+            if (try File nf = file::open(string::tformat("%s/name", base), "r")) {
+                if (try String line = io::treadline(&nf)) sensor_name = line.trim();
+                (void)nf.close();
+            }
+
+            for (int i = 1; i <= 8; i++) {
+                String input      = string::tformat("%s/power%d_input", base, i);
+                ulong? microwatts = linsys::read_ulong_file(input);
+                if (catch err = microwatts) continue;
+
+                out.push(
+                    {
+                        .name = string::format(allocator, "%s-power%d", sensor_name, i),
+                        .current_watts = (double)microwatts / 1000000.0,
+                    }
+                );
+            }
+        }
+    }
+
+    if (try PathList powercap_entries = io::path::ls(
+        tmem,
+        path::new(tmem, "/sys/class/powercap")!
+    )) {
+        foreach (entry : powercap_entries) {
+            String cap_name = entry.file_tbasename()!;
+            String base     = string::tformat("/sys/class/powercap/%s", cap_name);
+
+            String sensor_name = cap_name;
+            if (try File nf = file::open(string::tformat("%s/name", base), "r")) {
+                if (try String line = io::treadline(&nf)) sensor_name = line.trim();
+                (void)nf.close();
+            }
+
+            String input       = string::tformat("%s/energy_uj", base);
+            ulong? microjoules = linsys::read_ulong_file(input);
+            if (catch err = microjoules) continue;
+
+            String power_input = string::tformat("%s/power_uw", base);
+            ulong? microwatts  = linsys::read_ulong_file(power_input);
+
+            if (catch microwatts) continue;
+            out.push(
+                {
+                    .name = sensor_name.copy(allocator),
+                    .current_watts = (double)microwatts / 1000000.0,
+                }
+            );
+        }
+    }
+
+    SensorPower[] result = out.to_array(allocator);
+    transferred = true;
+    return result;
+}
+
+fn void SensorPower[].free(self, Allocator allocator) => linsys::free_slice(self, allocator);
+fn void SensorPower.free(self, Allocator allocator) => linsys::free_fields(self, allocator);
+
+
+// tests
+fn void test_sensor_temperatures() @test {
+    linsys::@tracker(; Allocator alloc) {
+        SensorTemperature[]? temps_opt = temperatures(alloc);
+        if (catch err = temps_opt) return;
+        defer temps_opt.free(alloc);
+
+        foreach (temp : temps_opt) {
+            assert(temp.name.len > 0);
+            assert(temp.current >= 0.0);
+            assert(temp.critical >= 0.0);
+        }
+    };
+}
+
+fn void test_sensor_batteries() @test {
+    linsys::@tracker(; Allocator alloc) {
+        SensorBattery[]? bats_opt = batteries(alloc);
+        if (catch err = bats_opt) return;
+
+        SensorBattery[] bats = bats_opt;
+        defer bats.free(alloc);
+
+        foreach (bat : bats) {
+            assert(bat.percent >= 0.0 && bat.percent <= 100.0);
+            assert(bat.secs_left >= -1);
+        }
+    };
+}
+
+fn void test_sensor_power_wattage() @test {
+    linsys::@tracker(; Allocator alloc) {
+        SensorPower[]? power_opt = power(alloc);
+        if (catch err = power_opt) return;
+
+        SensorPower[] pwr = power_opt;
+        defer {
+            foreach (p : pwr) linsys::free_fields(p, alloc);
+            linsys::free_slice(pwr, alloc);
+        }
+
+        foreach (p : pwr) {
+            assert(p.current_watts >= 0.0);
+        }
+    };
+}
+
+fn void test_sensor_fan() @test {
+    linsys::@tracker(; Allocator alloc) {
+        SensorFan[]? fans = sensors::fans(alloc);
+        if (catch fans) return;
+        fans.free(alloc);
+    };
+}
+
+
+fn void test_fan_poller() @test {
+    linsys::@tracker(; Allocator alloc) {
+        FanPoller poller = sensors::fan_poller(alloc)!!;
+
+        for (int i = 0; i < 100; i++) {
+            poller.@poll(; SensorFan[] sf) {
+                assert(sf.len > 0);
+            }!!;
+        }
+
+        poller.close();
+    };
+}

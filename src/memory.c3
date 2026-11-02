@@ -53,6 +53,10 @@ struct SwapMemory {
 
     ulong sin;
     ulong sout;
+
+    ulong oom_kill;
+    ulong pgfault;
+    ulong pgmajfault;
 }
 
 struct MemoryStats {
@@ -64,6 +68,7 @@ struct MemoryPoller {
     File meminfo;
     File vmstat;
     Allocator allocator;
+    MemoryStats current;
 }
 
 fn ulong? kb_to_bytes(ulong value) @private {
@@ -214,12 +219,17 @@ fn VirtualMemory? parse_virtual_memory(File* file) @private => @pool() {
         return linsys::PARSE_ERROR~;
     }
 
-    if (found_available && vm.available <= vm.total) {
-        vm.used = vm.total - vm.available;
-    } else if (found_free && vm.free <= vm.total) {
-        vm.used = vm.total - vm.free;
+    // Fallback for older kernels missing MemAvailable
+    if (!found_available) {
+        vm.available = vm.free + vm.buffers + vm.cached;
+    }
+
+    ulong cached_and_buffers = vm.buffers + vm.cached;
+
+    if (vm.total >= (vm.free + cached_and_buffers)) {
+        vm.used = vm.total - vm.free - cached_and_buffers;
     } else {
-        linsys::push_error("virtualmemory::used", linsys::PARSE_ERROR);
+        vm.used = vm.total - vm.available;
     }
 
     if (vm.total > 0) {
@@ -271,14 +281,15 @@ fn SwapMemory? parse_swap_memory(File* meminfo, File* vmstat) @private => @pool(
         return linsys::PARSE_ERROR~;
     }
 
-    if (found_free && sm.free <= sm.total) {
+    // If total is 0 -- no swap configured, everything is 0.
+    if (sm.total == 0) {
+        sm.used = 0;
+        sm.percent = 0.0;
+    } else if (found_free && sm.free <= sm.total) {
         sm.used = sm.total - sm.free;
+        sm.percent = (double)sm.used / (double)sm.total * 100.0;
     } else {
         linsys::push_error("swapmemory::free", linsys::PARSE_ERROR);
-    }
-
-    if (sm.total > 0) {
-        sm.percent = (double)sm.used / (double)sm.total * 100.0;
     }
 
     ulong page_size = system::get_page_size()!;
@@ -287,25 +298,39 @@ fn SwapMemory? parse_swap_memory(File* meminfo, File* vmstat) @private => @pool(
         if (line.len == 0) continue;
 
         String[] fields = linsys::split_whitespace(line);
-
         if (fields.len < 2) continue;
 
         String key = fields[0];
 
-        if (key != "pswpin" && key != "pswpout") {
+        if (key != "pswpin" && key != "pswpout" && key != "oom_kill" && key != "pgfault"
+            && key != "pgmajfault") {
             continue;
         }
 
-        ulong pages = 0;
-        ulong bytes = 0;
-
-        linsys::@try_field(pages, fields[1].to_ulong(), "swapmemory::pages", 0);
-
-        linsys::@try_field(bytes, pages_to_bytes(pages, page_size), "swapmemory::bytes", 0);
+        ulong raw_val = 0;
+        linsys::@try_field(raw_val, fields[1].to_ulong(), "vmevents::raw", 0);
 
         switch (key) {
-            case "pswpin": sm.sin = bytes;
-            case "pswpout": sm.sout = bytes;
+            case "pswpin":
+                linsys::@try_field(
+                    sm.sin,
+                    pages_to_bytes(raw_val, page_size),
+                    "swapmemory::bytes",
+                    0
+                );
+            case "pswpout":
+                linsys::@try_field(
+                    sm.sout,
+                    pages_to_bytes(raw_val, page_size),
+                    "swapmemory::bytes",
+                    0
+                );
+            case "oom_kill":
+                sm.oom_kill = raw_val;
+            case "pgfault":
+                sm.pgfault = raw_val;
+            case "pgmajfault":
+                sm.pgmajfault = raw_val;
         }
     }
 
@@ -330,8 +355,7 @@ fn SwapMemory? swap_memory() => @pool() {
 }
 
 fn MemoryPoller? poller(Allocator allocator) {
-    File meminfo = file::open("/proc/meminfo", "r")!;
-
+    File meminfo       = file::open("/proc/meminfo", "r")!;
     File? maybe_vmstat = file::open("/proc/vmstat", "r");
 
     if (catch err = maybe_vmstat) {
@@ -343,6 +367,7 @@ fn MemoryPoller? poller(Allocator allocator) {
         .meminfo = meminfo,
         .vmstat = maybe_vmstat,
         .allocator = allocator,
+        .current = {}
     };
 }
 
@@ -372,15 +397,123 @@ macro void? MemoryPoller.@poll(&self; @body(stats)) => @pool() {
 
     SwapMemory sm = parse_swap_memory(&self.meminfo, &self.vmstat)!;
 
-    MemoryStats stats = {
+    self.current = {
         .virtual = vm,
         .swap = sm,
     };
 
-    @body(stats);
+    @body(self.current);
 }
 
 fn void MemoryPoller.close(&self) {
     (void)self.meminfo.close();
     (void)self.vmstat.close();
 }
+
+struct KsmMemory {
+    ulong shared_bytes;
+    ulong sharing_bytes;
+    ulong unshared_bytes;
+    ulong volatile_bytes;
+    ulong full_scans;
+}
+
+// Returns NOT_FOUND if the kernel was compiled without CONFIG_KSM
+fn KsmMemory? ksm_memory() {
+    ulong page_size = system::get_page_size()!;
+    KsmMemory ksm   = { };
+
+    ulong? shared = linsys::read_ulong_file("/sys/kernel/mm/ksm/pages_shared");
+    if (catch err = shared) return linsys::NOT_FOUND~;
+
+    ksm.shared_bytes = shared * page_size;
+
+    ulong? sharing = linsys::read_ulong_file("/sys/kernel/mm/ksm/pages_sharing");
+    if (catch err = sharing) {
+    } else {
+        ksm.sharing_bytes = sharing * page_size;
+    }
+
+    ulong? unshared = linsys::read_ulong_file("/sys/kernel/mm/ksm/pages_unshared");
+    if (catch err = unshared) {
+    } else {
+        ksm.unshared_bytes = unshared * page_size;
+    }
+
+    ulong? vol = linsys::read_ulong_file("/sys/kernel/mm/ksm/pages_volatile");
+    if (catch err = vol) {
+    } else {
+        ksm.volatile_bytes = vol * page_size;
+    }
+
+    ulong? scans = linsys::read_ulong_file("/sys/kernel/mm/ksm/full_scans");
+    if (catch err = scans) {
+    } else {
+        ksm.full_scans = scans;
+    }
+
+    return ksm;
+}
+
+// tests
+fn void test_memory_kb_to_bytes_overflow() @test {
+    ulong? bytes = kb_to_bytes(ulong::max);
+
+    if (catch err = bytes) {
+        assert(err == linsys::PARSE_ERROR);
+    } else {
+        assert(false);
+    }
+}
+
+fn void test_memory_virtual_memory() @test {
+    linsys::@tracker(; Allocator alloc) {
+        VirtualMemory? vm_opt = virtual_memory();
+        if (catch err = vm_opt) return;
+
+        assert(vm_opt.total > 0);
+        assert(vm_opt.available > 0);
+
+        assert(vm_opt.used <= vm_opt.total);
+        assert(vm_opt.percent >= 0.0 && vm_opt.percent <= 100.0);
+    };
+}
+
+fn void test_memory_swap_memory() @test {
+    linsys::@tracker(; Allocator alloc) {
+        SwapMemory? sm_opt = swap_memory();
+        if (catch err = sm_opt) return;
+
+        assert(sm_opt.percent >= 0.0 && sm_opt.percent <= 100.0);
+        assert(sm_opt.used <= sm_opt.total);
+    };
+}
+
+fn void test_memory_poller() @test {
+    linsys::@tracker(; Allocator alloc) {
+        MemoryPoller poller = memory::poller(alloc)!!;
+        poller.close();
+    };
+}
+
+fn void test_memory_poller_poll_virtual() @test {
+    linsys::@tracker(; Allocator alloc) {
+        MemoryPoller poller = memory::poller(alloc)!!;
+        poller.@poll_virtual(; vm) {
+            assert(vm.total > 0);
+        }!!;
+        poller.close();
+    };
+}
+
+fn void test_memory_poller_poll_swap() @test {
+    linsys::@tracker(; Allocator alloc) {
+        MemoryPoller poller = memory::poller(alloc)!!;
+        poller.@poll_swap(; sm) {
+            assert(sm.total > 0);
+        }!!;
+
+        poller.close();
+    };
+}
+

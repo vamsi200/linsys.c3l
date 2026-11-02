@@ -2243,3 +2243,169 @@ fn SchedStat? sched_stat(int pid) => @pool() {
 
     return result;
 }
+
+// tests
+fn void test_threads() @test {
+    linsys::@tracker(; Allocator alloc) {
+        ThreadInfo[]? s = process::threads(alloc, posix::getpid());
+        if (catch s) return;
+        s.free(alloc);
+    };
+}
+
+fn void test_info() @test {
+    linsys::@tracker(; Allocator alloc) {
+        ProcessInfo? pi = process::info(alloc, posix::getpid());
+        if (catch pi) return;
+        pi.free(alloc);
+    };
+}
+
+fn void test_proc() @test {
+    linsys::@tracker(; Allocator alloc) {
+        Process? pi = process::proc(alloc, posix::getpid());
+        if (catch pi) return;
+        pi.free(alloc);
+    };
+}
+
+fn void test_read_cmdline() @test {
+    linsys::@tracker(; Allocator alloc) {
+        String? s = process::read_cmdline(alloc, posix::getpid());
+        if (catch s) return;
+        mem::alloc::free(alloc, s);
+    };
+}
+
+fn void test_read_exe() @test {
+    linsys::@tracker(; Allocator alloc) {
+        String? s = process::read_exe(alloc, posix::getpid());
+        if (catch s) return;
+        mem::alloc::free(alloc, s);
+    };
+}
+
+fn void test_list_pids() @test {
+    linsys::@tracker(; Allocator alloc) {
+        int[]? s = process::list_pids(alloc);
+        if (catch s) return;
+        mem::alloc::free(alloc, s);
+    };
+}
+
+fn void test_cwd() @test {
+    linsys::@tracker(; Allocator alloc) {
+        String? s = process::cwd(alloc, posix::getpid());
+        if (catch s) return;
+        mem::alloc::free(alloc, s);
+    };
+}
+
+fn void test_fds() @test {
+    linsys::@tracker(; Allocator alloc) {
+        int[]? s = process::fds(alloc, posix::getpid());
+        if (catch s) return;
+        mem::alloc::free(alloc, s);
+    };
+}
+
+
+fn void test_all_processes() @test {
+    linsys::@tracker(; Allocator alloc) {
+        Process[]? procs = process::all_processes(alloc);
+        if (catch procs) return;
+        procs.free(alloc);
+    };
+}
+
+fn void test_process_poller_cpu_percent() @test {
+    @assert_leak() {
+        ProcessPoller poller = process::poller(posix::getpid())!!;
+        double? pct          = poller.cpu_percent();
+        if (catch pct) return;
+    };
+}
+
+fn void test_process_poller_memory_percent() @test {
+    @assert_leak() {
+        ProcessPoller poller = process::poller(posix::getpid())!!;
+        double? pct          = poller.memory_percent();
+        if (catch pct) return;
+    };
+}
+
+fn void test_process_poller_io_counters() @test {
+    @assert_leak() {
+        ProcessPoller poller = process::poller(posix::getpid())!!;
+        IoCounters? io       = poller.io_counters();
+        if (catch io) return;
+    };
+}
+
+fn void test_process_poller_exists() @test {
+    @assert_leak() {
+        ProcessPoller poller = process::poller(posix::getpid())!!;
+        assert(poller.exists(), "current pid should always exist");
+    };
+}
+
+fn void test_env_var() @test {
+    linsys::@tracker(; Allocator alloc) {
+        EnvVar[]? vars = process::environ(alloc, 1);
+        if (catch vars) return;
+        vars.free(alloc);
+    };
+}
+
+fn void test_memory_map() @test {
+    linsys::@tracker(; Allocator alloc) {
+        MemoryMap[]? mmaps = process::maps(alloc, 1);
+        if (catch mmaps) return;
+        mmaps.free(alloc);
+    };
+}
+
+fn void test_open_file() @test {
+    linsys::@tracker(; Allocator alloc) {
+        OpenFile[]? files = process::open_files(alloc, posix::getpid());
+        if (catch files) return;
+        files.free(alloc);
+    };
+}
+
+fn void test_rlimit_entry() @test {
+    linsys::@tracker(; Allocator alloc) {
+        RLimitEntry[]? limits = process::rlimits_get(alloc, 1);
+        if (catch limits) return;
+        limits.free(alloc);
+    };
+}
+
+fn void test_process_fd_paths_leaks() @test {
+    linsys::@tracker(; Allocator alloc) {
+        String[]? result = process::fd_paths(alloc, (int)posix::getpid());
+        if (catch result) {
+            io::printn("fd_paths failed");
+            return;
+        }
+
+        foreach (path : result) {
+            mem::alloc::free(alloc, path);
+        }
+        mem::alloc::free(alloc, result);
+    };
+}
+
+fn void test_process_memory_full_info() @test {
+    MemoryFullInfo? mfi = process::memory_full_info((int)posix::getpid());
+
+    if (catch mfi) {
+        assert(false, "memory_full_info failed");
+    }
+
+    assert(mfi.vms >= mfi.rss, "RSS exceeds VMS");
+    assert(mfi.rss > 0, "RSS is zero");
+    assert(mfi.pss <= mfi.rss, "PSS exceeds RSS");
+    assert(mfi.uss <= mfi.rss, "USS exceeds RSS");
+}
+

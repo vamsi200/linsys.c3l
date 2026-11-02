@@ -12,6 +12,7 @@ struct DiskPartition {
     String mountpoint;
     String filesystem;
     String options;
+    ulong maxfile;
 }
 
 struct DiskUsage {
@@ -117,12 +118,6 @@ fn String unescape_mount_field(Allocator allocator, String input) @private {
     return result;
 }
 
-struct DiskContext @deprecated {
-    HashMap{String, ulong} sector_size_cache;
-    Mutex cache_mutex;
-    Allocator allocator;
-}
-
 fn bool is_pseudo_filesystem(String fs) @private {
     switch (fs) {
         case "proc":
@@ -143,8 +138,15 @@ fn bool is_pseudo_filesystem(String fs) @private {
         case "autofs":
         case "rpc_pipefs":
         case "binfmt_misc":
+        case "overlay":
+        case "squashfs":
+        case "tmpfs":
+        case "efivarfs":
+        case "devfs":
+        case "none":
+        case "fuse.gvfsd-fuse":
+        case "fuse.portal":
             return true;
-
         default:
             return false;
     }
@@ -182,19 +184,26 @@ fn DiskPartition[]? partitions(Allocator allocator, bool all = true) => @pool() 
             continue;
         }
 
+        String mountpoint = unescape_mount_field(tmem, fields[1]);
+
+        Statvfs svfs  = { };
+        ulong maxfile = 0;
+
+        if (_statvfs(mountpoint.zstr_tcopy(), &svfs) == 0) maxfile = svfs.name_max;
+
         parts.push(
             {
                 .device = unescape_mount_field(allocator, fields[0]),
                 .mountpoint = unescape_mount_field(allocator, fields[1]),
                 .filesystem = unescape_mount_field(allocator, fields[2]),
                 .options = unescape_mount_field(allocator, fields[3]),
+                .maxfile = maxfile,
             }
         );
     }
 
     DiskPartition[] output = parts.to_array(allocator);
     transferred = true;
-
     return output;
 }
 
@@ -207,9 +216,7 @@ fn void DiskPartition.free(self, Allocator allocator) => linsys::free_fields(sel
 fn DiskUsage? usage(String path) => @pool() {
     Statvfs svfs = { };
 
-    if (_statvfs(path.zstr_tcopy(), &svfs) != 0) {
-        return linsys::IO_ERROR~;
-    }
+    if (_statvfs(path.zstr_tcopy(), &svfs) != 0) return linsys::IO_ERROR~;
 
     ulong block_size = svfs.fragment_size;
 
@@ -225,46 +232,6 @@ fn DiskUsage? usage(String path) => @pool() {
         .free = free,
         .percent = usable > 0 ? (double)used / usable * 100.0 : 0.0,
     };
-}
-
-fn void DiskContext.init(&self, Allocator allocator) {
-    self.allocator = allocator;
-    self.sector_size_cache.init(allocator);
-
-    if (catch err = self.cache_mutex.init()) {
-        self.sector_size_cache.free();
-        io::printfn("mutex init failed: %s", err);
-        unreachable();
-    }
-}
-
-fn void DiskContext.free(&self) {
-    foreach (key : self.sector_size_cache.key_iter()) {
-        mem::alloc::free(self.allocator, key);
-    }
-
-    self.sector_size_cache.free();
-    self.cache_mutex.destroy();
-}
-
-fn ulong DiskContext.sector_size(&self, String device) => @pool() {
-    self.cache_mutex.lock();
-
-    if (try ulong size = self.sector_size_cache.get(device)) {
-        self.cache_mutex.unlock();
-        return size;
-    }
-    self.cache_mutex.unlock();
-
-    String sector_path = string::tformat("/sys/block/%s/queue/physical_block_size", device);
-    ulong size         = linsys::read_ulong_file(sector_path) ?? 512;
-    self.cache_mutex.lock();
-    defer self.cache_mutex.unlock();
-
-    if (try ulong existing = self.sector_size_cache.get(device)) return existing;
-    self.sector_size_cache.set(device, size);
-
-    return size;
 }
 
 const int DISKSTATS_MIN_FIELDS = 14; // kernel 2.6+
@@ -366,7 +333,20 @@ fn DiskIoCounters? parse_line(Allocator allocator, String[] fields) @private {
     };
 }
 
-fn DiskIoCounters[]? io_counters(Allocator allocator) => @pool() {
+fn bool is_physical_disk(String name) @private => @pool() {
+    if (name.starts_with("loop") || name.starts_with("ram")) return false;
+    String part_path = string::tformat("/sys/class/block/%s/partition", name);
+
+    File? opt_file = file::open(part_path, "r");
+    if (catch err = opt_file) {
+        return true;
+    } else {
+        (void)opt_file.close();
+        return false;
+    }
+}
+
+fn DiskIoCounters[]? io_counters(Allocator allocator, bool physical_only = false) => @pool() {
     File file = file::open("/proc/diskstats", "r")!;
     defer (void)file.close();
     List{DiskIoCounters} disks;
@@ -385,6 +365,16 @@ fn DiskIoCounters[]? io_counters(Allocator allocator) => @pool() {
     while (try line = io::treadline(&file)) {
         if (line.len == 0) continue;
         String[] fields = linsys::split_whitespace(line.trim());
+
+        if (fields.len < DISKSTATS_MIN_FIELDS) {
+            linsys::push_error("diskiocounters::line", linsys::PARSE_ERROR);
+            continue;
+        }
+
+        if (physical_only && !is_physical_disk(fields[2])) {
+            continue;
+        }
+
         if (try disk = parse_line(allocator, fields)) {
             disks.push(disk);
         } else {
@@ -620,9 +610,7 @@ fn DiskIoRates io_rates(DiskIoCounters previous, DiskIoCounters current, double 
             0
         );
 
-        if (reads > 0) {
-            rates.avg_read_latency_ms = (double)read_ms / (double)reads;
-        }
+        if (reads > 0) rates.avg_read_latency_ms = (double)read_ms / (double)reads;
     }
 
     if (previous.write_time && current.write_time && previous.write_count && current.write_count) {
@@ -633,26 +621,18 @@ fn DiskIoRates io_rates(DiskIoCounters previous, DiskIoCounters current, double 
             0
         );
 
-        if (writes > 0) {
-            rates.avg_write_latency_ms = (double)write_ms / (double)writes;
-        }
+        if (writes > 0) rates.avg_write_latency_ms = (double)write_ms / (double)writes;
     }
 
     return rates;
 }
 
 fn double? io_utilization(DiskIoCounters previous, DiskIoCounters current, double elapsed_seconds) {
-    if (elapsed_seconds <= 0.0) {
-        return linsys::INVALID_ARGUMENT~;
-    }
-
-    if (current.busy_time < previous.busy_time) {
-        return linsys::PARSE_ERROR~;
-    }
+    if (elapsed_seconds <= 0.0) return linsys::INVALID_ARGUMENT~;
+    if (current.busy_time < previous.busy_time) return linsys::PARSE_ERROR~;
 
     ulong busy_delta = current.busy_time - previous.busy_time;
-
-    double percent = (double)busy_delta / (elapsed_seconds * 1000.0) * 100.0;
+    double percent   = (double)busy_delta / (elapsed_seconds * 1000.0) * 100.0;
 
     return math::min(percent, 100.0);
 }
@@ -699,7 +679,6 @@ fn DiskIoLatency io_latency(DiskIoCounters previous, DiskIoCounters current) {
     );
 
     result.read_ms = reads > 0 ? (double)read_time / (double)reads : 0.0;
-
     result.write_ms = writes > 0 ? (double)write_time / (double)writes : 0.0;
 
     return result;
@@ -833,5 +812,278 @@ fn DiskInodeUsage? inode_usage(String path) => @pool() {
         .used = used,
         .free = free,
         .percent = usable > 0 ? (double)used / usable * 100.0 : 0.0,
+    };
+}
+
+<*
+ @require target_path.len > 0 : "path must not be empty"
+*>
+fn String? device_for_path(Allocator allocator, String target_path) => @pool() {
+    DiskPartition[] parts = partitions(tmem)!;
+
+    String match  = "";
+    String device = "";
+    usz max_len   = 0;
+
+    foreach (part : parts) {
+        if (target_path.starts_with(part.mountpoint)) {
+            usz mlen = part.mountpoint.len;
+
+            bool valid_boundary = (target_path.len == mlen) || (part.mountpoint == "/")
+                || (target_path[mlen] == '/');
+
+            if (valid_boundary && mlen > max_len) {
+                max_len = mlen;
+                match = part.mountpoint;
+                device = part.device;
+            }
+        }
+    }
+
+    if (max_len > 0) {
+        return device.copy(allocator);
+    }
+
+    return linsys::NOT_FOUND~;
+}
+
+// NOTE: some tests are written by LLM's
+fn void test_disk_partitions() @test {
+    linsys::@tracker(; Allocator alloc) {
+        DiskPartition[]? parts = disk::partitions(alloc, true);
+        if (catch parts) return;
+        parts.free(alloc);
+    };
+}
+
+fn void test_diskusage() @test {
+    @assert_leak() {
+        DiskUsage? d = disk::usage("/");
+        if (catch d) return;
+    };
+}
+
+fn void test_disk_io_counters() @test {
+    linsys::@tracker(; Allocator alloc) {
+        DiskIoCounters[]? counters = disk::io_counters(alloc);
+        if (catch counters) return;
+        counters.free(alloc);
+    };
+}
+
+fn void test_disk_device_info() @test {
+    linsys::@tracker(; Allocator alloc) {
+        DiskDeviceInfo info = disk::device_info(alloc, "sda");
+        info.free(alloc);
+    };
+}
+
+fn void test_disk_io_poller() @test {
+    linsys::@tracker(; Allocator alloc) {
+        DiskIoPoller? poller = disk::poller(alloc);
+        if (catch poller) return;
+        poller.close();
+    };
+}
+
+fn void test_io_counters() @test {
+    linsys::@tracker(; Allocator alloc) {
+        DiskIoCounters[]? counters = disk::io_counters(alloc);
+        if (catch counters) return;
+        counters.free(alloc);
+    };
+}
+
+fn void test_disk_io_poller_perdisk() @test {
+    linsys::@tracker(; Allocator alloc) {
+        DiskIoPoller poller = disk::poller(alloc)!!;
+        if (catch poller.@poll_perdisk("sda" ; DiskIoCounters dio) {
+        }) {
+        }
+        poller.close();
+    };
+}
+
+fn void test_disk_parse_line_truncated() @test {
+    linsys::@tracker(; Allocator alloc) {
+        String short_line = " 8  0 sda".copy(alloc);
+        defer mem::alloc::free(alloc, short_line);
+
+        String[] fields = linsys::split_whitespace(short_line);
+
+        DiskIoCounters? result = parse_line(alloc, fields);
+
+        if (catch result) return;
+        result.free(alloc);
+    };
+}
+
+fn void test_disk_parse_line_overflow_values() @test {
+    linsys::@tracker(; Allocator alloc) {
+        String overflow_line = " 8  0 sda 0 0 18446744073709551615 0 0 0 0 0 0 0 0 0 0 0 0".copy(
+            alloc
+        );
+        defer mem::alloc::free(alloc, overflow_line);
+
+        String[] fields = linsys::split_whitespace(overflow_line);
+
+        DiskIoCounters? result = parse_line(alloc, fields);
+        if (catch result) return;
+
+        assert(result.read_bytes == 0);
+        result.free(alloc);
+    };
+}
+
+fn void test_unescape_mount_field_edge_cases() @test {
+    linsys::@tracker(; Allocator alloc) {
+        String raw = "/dev/mapper/vg0-root\\040test\\999\\0".copy(alloc);
+        defer mem::alloc::free(alloc, raw);
+
+        String unescaped = unescape_mount_field(alloc, raw);
+        defer mem::alloc::free(alloc, unescaped);
+
+        assert(unescaped.len > 0);
+    };
+}
+
+fn void test_disk_io_rates_zero_and_backwards_deltas() @test {
+    DiskIoCounters prev = { .read_bytes = 5000, .busy_time = 200 };
+    DiskIoCounters curr = { .read_bytes = 1000, .busy_time = 100 };
+
+    DiskIoRates rates = io_rates(prev, curr, 1.0);
+
+    assert(rates.read_bytes_per_sec >= 0.0);
+}
+
+fn void test_disk_io_utilization_edge_cases() @test {
+    DiskIoCounters prev = { .busy_time = 100 };
+    DiskIoCounters curr = { .busy_time = 150 };
+
+    double? normal_util = io_utilization(prev, curr, 1.0);
+    if (catch normal_util) {
+        assert(false);
+    } else {
+        assert(normal_util == 5.0);
+    }
+
+    double? zero_time_util = io_utilization(prev, curr, 0.0);
+    if (catch err = zero_time_util) {
+        assert(err == linsys::INVALID_ARGUMENT);
+    } else {
+        assert(false);
+    }
+
+    DiskIoCounters curr_reset = { .busy_time = 50 };
+    double? reset_util        = io_utilization(prev, curr_reset, 1.0);
+    if (catch err = reset_util) {
+        assert(err == linsys::PARSE_ERROR);
+    } else {
+        assert(false);
+    }
+}
+
+fn void test_disk_io_latency_zero_ops() @test {
+    DiskIoCounters prev = {
+        .read_count = 10,
+        .read_time = 100,
+        .write_count = 5,
+        .write_time = 50
+    };
+    DiskIoCounters curr = prev;
+
+    DiskIoLatency latency = io_latency(prev, curr);
+
+    assert(latency.read_ms == 0.0);
+    assert(latency.write_ms == 0.0);
+}
+
+fn void test_disk_io_counters_perdisk_missing() @test {
+    linsys::@tracker(; Allocator alloc) {
+        DiskIoCounters? result = io_counters_perdisk(alloc, "nonexistent_fake_device_123");
+        if (catch err = result) {
+            assert(err == linsys::NOT_FOUND);
+        } else {
+            result.free(alloc);
+            assert(false);
+        }
+    };
+}
+
+fn void test_disk_usage_root_fs() @test {
+    DiskUsage? u = usage("/");
+    if (catch u) return;
+
+    assert(u.total > 0);
+    assert(u.percent >= 0.0 && u.percent <= 100.0);
+}
+
+fn void test_disk_inode_usage_root_fs() @test {
+    DiskInodeUsage? u = inode_usage("/");
+    if (catch u) return;
+
+    assert(u.total > 0);
+    assert(u.percent >= 0.0 && u.percent <= 100.0);
+}
+
+fn void test_disk_expanded_pseudo_filesystems() @test {
+    assert(is_pseudo_filesystem("overlay"));
+    assert(is_pseudo_filesystem("squashfs"));
+    assert(is_pseudo_filesystem("tmpfs"));
+    assert(is_pseudo_filesystem("efivarfs"));
+
+    assert(!is_pseudo_filesystem("ext4"));
+    assert(!is_pseudo_filesystem("zfs"));
+    assert(!is_pseudo_filesystem("vfat"));
+}
+
+fn void test_disk_partitions_maxfile_populated() @test {
+    linsys::@tracker(; Allocator alloc) {
+        DiskPartition[]? parts_opt = partitions(alloc, true);
+        if (catch parts_opt) return;
+        defer parts_opt.free(alloc);
+
+        bool found_root = false;
+        foreach (part : parts_opt) {
+            if (part.mountpoint == "/") {
+                found_root = true;
+                assert(part.maxfile > 0);
+            }
+        }
+
+        assert(found_root);
+    };
+}
+
+fn void test_disk_io_counters_physical_only() @test {
+    linsys::@tracker(; Allocator alloc) {
+        DiskIoCounters[]? all_disks_opt = io_counters(alloc, false);
+        if (catch all_disks_opt) return;
+        defer all_disks_opt.free(alloc);
+
+        DiskIoCounters[]? physical_opt = io_counters(alloc, true);
+        if (catch physical_opt) return;
+        defer physical_opt.free(alloc);
+
+        // In almost all Linux environments, `all` (which includes loop devices
+        // and partition slices) will be significantly larger than `physical`
+        // (which only includes base physical drives like sda/nvme0n1).
+        assert(all_disks_opt.len >= physical_opt.len);
+
+        // Ensure no loopback or known partitions snuck into the physical list
+        foreach (disk : physical_opt) {
+            assert(!disk.name.starts_with("loop"));
+            assert(!disk.name.starts_with("ram"));
+        }
+    };
+}
+
+fn void test_disk_device_for_path_boundary() @test {
+    linsys::@tracker(; Allocator alloc) {
+        String? dev = device_for_path(alloc, "/proc/cpuinfo");
+        if (catch dev) return;
+        defer mem::alloc::free(alloc, dev);
+
+        assert(dev.len > 0);
     };
 }

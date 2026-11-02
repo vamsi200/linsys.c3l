@@ -246,3 +246,20 @@ fn fault errno_to_fault() @private {
             return linsys::IO_ERROR;
     }
 }
+
+
+// for tests
+macro void @tracker(; @body(alloc)) {
+    @pool() {
+        TrackingAllocator tracker;
+        tracker.init(tmem);
+        defer tracker.free();
+        defer if (tracker.has_leaks()) tracker.print_report();
+        {
+            @body(&tracker);
+        }
+
+        tracker.print_report();
+        assert (!tracker.has_leaks());
+    };
+}

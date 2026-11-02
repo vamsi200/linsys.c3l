@@ -311,27 +311,34 @@ fn ulong? cpu_total_ticks(String[] fields) @private {
 fn SystemCpuSnapshot[]? cpu_snapshot_percpu(Allocator allocator) => @pool() {
     File file = file::open("/proc/stat", "r")!;
     defer (void)file.close();
+
     List{SystemCpuSnapshot} snapshots;
     snapshots.init(allocator);
     defer snapshots.free();
+
     while (try line = io::treadline(&file)) {
         if (!line.starts_with("cpu") || line.starts_with("cpu ")) continue;
         String[] fields = linsys::split_whitespace(line);
         if (fields.len < 5 || fields[0].len <= 3) continue;
+
         if (catch fields[0][3..].to_int()) continue;
         ulong? total = cpu_total_ticks(fields);
+
         if (catch total) {
             linsys::push_error("cpu_snapshot::total", linsys::PARSE_ERROR);
             continue;
         }
+
         ulong idle = fields[4].to_ulong() ?? 0;
         if (fields.len > 5) {
             ulong wait = fields[5].to_ulong() ?? 0;
             if (wait > ulong::max - idle) continue;
             idle += wait;
         }
+
         snapshots.push({ .total = total, .idle = idle });
     }
+
     return snapshots.to_array(allocator);
 }
 
@@ -986,13 +993,8 @@ fn Users[]? users(Allocator allocator) => @pool() {
     return output;
 }
 
-fn void Users.free(self, Allocator allocator) {
-    linsys::free_fields(self, allocator);
-}
-
-fn void Users[].free(self, Allocator allocator) {
-    linsys::free_slice(self, allocator);
-}
+fn void Users.free(self, Allocator allocator) => linsys::free_fields(self, allocator);
+fn void Users[].free(self, Allocator allocator) => linsys::free_slice(self, allocator);
 
 // Will need to split Cgroups, if it becomes fairly large
 struct Cgroup {
@@ -1120,6 +1122,287 @@ fn Cgroup[]? cgroups(Allocator allocator) => @pool() {
     return output;
 }
 
-fn CgroupInfo? cgroup_info(Allocator allocator) @private => @pool() {
-    return linsys::UNKNOWN~;
+fn CgroupInfo? cgroup_info(Allocator allocator) => @pool() {
+    File file = file::open("/proc/self/cgroup", "r")!;
+    defer (void)file.close();
+
+    String cg_path = "";
+    bool is_v2     = false;
+
+    while (try line = io::treadline(&file)) {
+        if (line.len == 0) continue;
+
+        sz? first = line.index_of_char(':');
+        if (catch first) continue;
+
+        String remainder    = line[first + 1..];
+        sz? second_relative = remainder.index_of_char(':');
+        if (catch second_relative) continue;
+
+        sz second = first + 1 + second_relative;
+
+        String controllers = line[first + 1..second];
+        String path        = line[second + 1..].trim();
+
+        if (controllers == "") {
+            cg_path = path;
+            is_v2 = true;
+            break;
+        } else if (controllers.contains("memory")) {
+            cg_path = path;
+            is_v2 = false;
+        }
+    }
+
+    if (cg_path == "") return linsys::NOT_FOUND~;
+
+    CgroupInfo info = {
+        .path = cg_path.copy(allocator),
+    };
+
+    if (is_v2) {
+        String base = string::tformat("/sys/fs/cgroup%s", cg_path);
+
+        if (try ulong cur = linsys::read_ulong_file(string::tformat("%s/memory.current", base))) {
+            info.memory_current = cur;
+        }
+        if (try ulong max_v = linsys::read_ulong_file(string::tformat("%s/memory.max", base))) {
+            info.memory_max = max_v;
+        }
+    } else {
+        String base = string::tformat("/sys/fs/cgroup/memory%s", cg_path);
+
+        if (try ulong cur = linsys::read_ulong_file(
+            string::tformat("%s/memory.usage_in_bytes", base)
+        )) {
+            info.memory_current = cur;
+        }
+        if (try ulong max_v = linsys::read_ulong_file(
+            string::tformat("%s/memory.limit_in_bytes", base)
+        )) {
+            if (max_v < ulong::max / 2) info.memory_max = max_v;
+        }
+    }
+
+    if (info.memory_current == 0) {
+        return linsys::NOT_FOUND~;
+    }
+
+    return info;
+}
+
+fn void CgroupInfo.free(self, Allocator allocator) {
+    if (self.path.len > 0) mem::alloc::free(allocator, self.path);
+}
+fn void CgroupInfo[].free(self, Allocator allocator) => linsys::free_slice(self, allocator);
+
+
+// tests
+fn void test_system_cpu_times() @test {
+    SystemCpuTimes? times_opt = cpu_times();
+    if (catch err = times_opt) return;
+
+    assert(times_opt.user >= 0.0);
+    assert(times_opt.idle >= 0.0);
+}
+
+fn void test_system_cpu_times_percpu() @test {
+    linsys::@tracker(; Allocator alloc) {
+        SystemCpuTimes[]? sc = system::cpu_times_percpu(alloc);
+        if (catch sc) return;
+        sc.free(alloc);
+    };
+}
+
+fn void test_system_cpusnapshot() @test {
+    @assert_leak() {
+        SystemCpuSnapshot? sc = system::cpu_snapshot();
+    };
+}
+
+fn void test_system_cpu_snapshot_percpu() @test {
+    linsys::@tracker(; Allocator alloc) {
+        SystemCpuSnapshot[]? sc = system::cpu_snapshot_percpu(alloc);
+        if (catch sc) return;
+        sc.free(alloc);
+    };
+}
+
+fn void test_system_cpu_freq() @test {
+    @assert_leak() {
+        CpuFreq? sc = system::cpu_freq();
+        if (catch sc) return;
+    };
+}
+
+fn void test_cpu_freq_percpu() @test {
+    linsys::@tracker(; Allocator alloc) {
+        CpuFreq[]? sc = system::cpu_freq_percpu(alloc);
+        if (catch sc) return;
+        sc.free(alloc);
+    };
+}
+
+fn void test_cpustats() @test {
+    @assert_leak() {
+        CpuStats? sc = system::cpu_stats();
+        if (catch sc) return;
+    };
+}
+
+fn void test_loadavg() @test {
+    @assert_leak() {
+        LoadAvg? sc = system::load_avg();
+        if (catch sc) return;
+    };
+}
+
+fn void test_cpu_info() @test {
+    linsys::@tracker(; Allocator alloc) {
+        CpuInfo[]? sc = system::cpu_info(alloc);
+        if (catch sc) return;
+        sc.free(alloc);
+    };
+}
+
+fn void test_uptime() {
+    @assert_leak() {
+        double? sc = system::uptime();
+        if (catch sc) return;
+    };
+}
+
+fn void test_hostname() @test {
+    linsys::@tracker(; Allocator alloc) {
+        String? name = system::hostname(alloc);
+        if (catch name) return;
+        mem::alloc::free(alloc, name);
+    };
+}
+
+fn void test_kernel_version() @test {
+    linsys::@tracker(; Allocator alloc) {
+        String? ver = system::kernel_version(alloc);
+        if (catch ver) return;
+        mem::alloc::free(alloc, ver);
+    };
+}
+
+fn void test_os_release() @test {
+    linsys::@tracker(; Allocator alloc) {
+        String? rel = system::os_release(alloc);
+        if (catch rel) return;
+        mem::alloc::free(alloc, rel);
+    };
+}
+
+fn void test_boot_time() @test {
+    @assert_leak() {
+        ulong bt = system::boot_time()!!;
+    };
+}
+
+fn void test_read_clktck() @test {
+    @assert_leak() {
+        ulong bt = system::clktck();
+    };
+}
+
+
+fn void test_system_cpu_counts() @test {
+    CpuCount? counts_opt = cpu_count();
+    if (catch err = counts_opt) return;
+
+    assert(counts_opt.logical > 0);
+    assert(counts_opt.physical > 0);
+    assert(counts_opt.logical >= counts_opt.physical);
+}
+
+fn void test_system_load_avg() @test {
+    LoadAvg? load_opt = load_avg();
+    if (catch err = load_opt) return;
+
+    assert(load_opt.one >= 0.0);
+    assert(load_opt.five >= 0.0);
+    assert(load_opt.fifteen >= 0.0);
+}
+
+fn void test_system_uptime() @test {
+    double? up_opt = uptime();
+    if (catch err = up_opt) return;
+
+    assert(up_opt > 0.0);
+}
+
+fn void test_system_hostname_and_kernel() @test {
+    linsys::@tracker(; Allocator alloc) {
+        String? host_opt = hostname(alloc);
+        if (catch err = host_opt) return;
+        defer mem::alloc::free(alloc, host_opt);
+        assert(host_opt.len > 0);
+
+        String? kern_opt = kernel_version(alloc);
+        if (catch err = kern_opt) return;
+        defer mem::alloc::free(alloc, kern_opt);
+        assert(kern_opt.len > 0);
+    };
+}
+
+fn void test_system_users() @test {
+    linsys::@tracker(; Allocator alloc) {
+        Users[]? users_opt = users(alloc);
+        if (catch err = users_opt) return;
+
+        Users[] usrs = users_opt;
+        defer usrs.free(alloc);
+
+        foreach (u : usrs) {
+            assert(u.name.len > 0);
+            assert(u.pid > 0);
+        }
+    };
+}
+
+fn void test_system_cgroup_info() @test {
+    linsys::@tracker(; Allocator alloc) {
+        CgroupInfo? cg_opt = cgroup_info(alloc);
+        if (catch err = cg_opt) return;
+
+        CgroupInfo cg = cg_opt;
+        defer cg.free(alloc);
+
+        assert(cg.path.len > 0);
+        assert(cg.memory_current > 0);
+    };
+}
+
+fn void test_cpu_temp() @test {
+    linsys::@tracker(; Allocator alloc) {
+        ThermalZones[]? temps = system::thermal_zones(alloc);
+        if (catch temps) return;
+        temps.free(alloc);
+    };
+}
+
+fn void test_sensor_battery() @test {
+    linsys::@tracker(; Allocator alloc) {
+        SensorBattery[]? batteries = sensors::batteries(alloc);
+        if (catch batteries) return;
+        batteries.free(alloc);
+    };
+}
+
+fn void test_sensor_temperature() @test {
+    linsys::@tracker(; Allocator alloc) {
+        SensorTemperature[]? temps = sensors::temperatures(alloc);
+        if (catch temps) return;
+        temps.free(alloc);
+    };
+}
+
+fn void test_sensor_poller() @test {
+    linsys::@tracker(; Allocator alloc) {
+        SensorPoller poller = sensors::sensor_poller(alloc)!!;
+        poller.close();
+    };
 }
